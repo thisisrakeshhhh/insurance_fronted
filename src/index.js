@@ -138,6 +138,7 @@ RULES FOR STAGE PROGRESSION:
 3. Skip fields the user already volunteered (e.g. if they say "I have Star Health policy", record 'Star Health' as existing_insurer, and skip the question about existing insurance).
 4. Do not list stages or speak JSON schema to the customer.
 5. DO NOT transition to 'closing' or 'ended' stage early unless the customer explicitly says goodbye, wants to end the call, or refuses to talk. Progress sequentially: greeting -> permission -> need_analysis -> profiling -> recommendation -> closing -> ended.
+6. CRITICAL: 'spokenResponse' MUST be pure natural conversational speech (1-2 short friendly sentences). NEVER include JSON, code, brackets, or variable names in spokenResponse.
 
 OUTPUT FORMAT:
 You MUST respond with a JSON object. Do not output any markdown code blocks, backticks, or other text outside the JSON.
@@ -566,7 +567,7 @@ async function callGemini(env, prompt, systemPrompt = "") {
   
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 400 }
+    generationConfig: { temperature: 0.3, maxOutputTokens: 1000 }
   };
   if (systemPrompt) {
     body.systemInstruction = { parts: [{ text: systemPrompt }] };
@@ -661,16 +662,19 @@ function extractJson(text) {
 }
 
 function validateResponse(reply) {
-  if (!reply || reply.length === 0) {
+  if (!reply || typeof reply !== "string" || reply.length === 0) {
     return "I'm sorry, could you please repeat that?";
   }
+  let cleaned = reply.replace(/```json[\s\S]*?```/gi, "").replace(/```[\s\S]*?```/gi, "").replace(/\{[\s\S]*?\}/gi, "").trim();
+  if (!cleaned || cleaned.includes("extractedFields") || cleaned.includes("spokenResponse")) {
+    return "Thank you for sharing that. Could you tell me a bit more about your requirements?";
+  }
   const banned = ["restaurant", "menu", "pizza", "burger", "food order", "kitchen", "recipe", "cooking"];
-  const lower = reply.toLowerCase();
+  const lower = cleaned.toLowerCase();
   if (banned.some((term) => lower.includes(term))) {
     return "I can only help with health insurance policies today — shall we continue with that?";
   }
-  // Max 3 sentences
-  return reply.split(/(?<=[.?!])\s+/).slice(0, 3).join(" ");
+  return cleaned.split(/(?<=[.?!])\s+/).slice(0, 2).join(" ");
 }
 
 function getLocalFallbackResponse(speech, stage) {
@@ -717,40 +721,23 @@ async function getTurnResponse(env, conversationState, speechResult, direction) 
     const aiText = await generateAIResponse(env, userPrompt, systemPrompt);
     result = extractJson(aiText);
   } catch (err) {
-    log.error("AI turn generation failed, attempting fallback", { error: err.message });
+    log.error("AI turn generation failed", { error: err.message });
   }
   
-  if (!result) {
-    try {
-      const fallbackPrompt = `
-${systemPrompt}
-Based on the conversation, the customer said: "${speechResult}".
-Respond with ONLY a 1-3 sentence spoken reply as Asha. No JSON, no markdown.
-`;
-      const fallbackReply = await generateAIResponse(env, fallbackPrompt, "");
-      result = {
-        extractedFields: {},
-        detectedIntent: conversationState.intent || "unknown",
-        intentConfidence: 0.5,
-        objectionType: null,
-        wantsHuman: false,
-        updatedStage: conversationState.stage,
-        spokenResponse: validateResponse(fallbackReply),
-        callSummary: conversationState.summary || ""
-      };
-    } catch (fallbackErr) {
-      log.error("Conversational fallback also failed, applying rule-based response", { error: fallbackErr.message });
-      result = {
-        extractedFields: {},
-        detectedIntent: conversationState.intent || "unknown",
-        intentConfidence: 0.5,
-        objectionType: null,
-        wantsHuman: false,
-        updatedStage: conversationState.stage,
-        spokenResponse: getLocalFallbackResponse(speechResult, conversationState.stage),
-        callSummary: conversationState.summary || ""
-      };
-    }
+  if (!result || !result.spokenResponse) {
+    log.info("Using instant rule-based fallback response", { stage: conversationState.stage });
+    result = {
+      extractedFields: {},
+      detectedIntent: conversationState.intent || "unknown",
+      intentConfidence: 0.5,
+      objectionType: null,
+      wantsHuman: false,
+      updatedStage: conversationState.stage,
+      spokenResponse: getLocalFallbackResponse(speechResult, conversationState.stage),
+      callSummary: conversationState.summary || ""
+    };
+  } else {
+    result.spokenResponse = validateResponse(result.spokenResponse);
   }
   
   return result;
