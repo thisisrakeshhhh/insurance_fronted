@@ -15,7 +15,7 @@ const CONFIG = {
   GATHER_LANGUAGE: "en-IN",
   SPEECH_TIMEOUT: "auto",
   MAX_GATHER_ATTEMPTS: 3,
-  GEMINI_MODEL: "gemini-2.5-flash",
+  GEMINI_MODEL: "gemini-1.5-flash",
   OPENAI_MODEL: "gpt-4o-mini",
 };
 
@@ -139,6 +139,7 @@ RULES FOR STAGE PROGRESSION:
 4. Do not list stages or speak JSON schema to the customer.
 5. DO NOT transition to 'closing' or 'ended' stage early unless the customer explicitly says goodbye, wants to end the call, or refuses to talk. Progress sequentially: greeting -> permission -> need_analysis -> profiling -> recommendation -> closing -> ended.
 6. CRITICAL: 'spokenResponse' MUST be pure natural conversational speech (1-2 short friendly sentences). NEVER include JSON, code, brackets, or variable names in spokenResponse.
+7. OUTBOUND CALL GOAL: Warmly collect missing customer profile details (${JSON.stringify(conversation.missingFields)}) ONE QUESTION AT A TIME like a real health advisor. Ask for their name, age, city, who they want to cover, or existing insurance step-by-step.
 
 OUTPUT FORMAT:
 You MUST respond with a JSON object. Do not output any markdown code blocks, backticks, or other text outside the JSON.
@@ -562,7 +563,8 @@ async function pushToSheets(env, row) {
 async function callGemini(env, prompt, systemPrompt = "") {
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
-  const model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL;
+  let model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL;
+  if (model === "gemini-2.5-flash" || !model) model = "gemini-1.5-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   
   const body = {
