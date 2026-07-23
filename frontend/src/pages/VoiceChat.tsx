@@ -12,16 +12,18 @@ import { stageColor } from '@/utils/format'
 import { PhoneOff, User, Info } from 'lucide-react'
 
 export function VoiceChat() {
-  const { startSession, stopSession, sendTurn, isStarting } = useVoiceSession()
+  const { startSession, stopSession, startManualListening } = useVoiceSession()
   const { status, messages, currentCustomer, currentStage, currentModel, lastLatencyMs, sessionStartTime, lastTurn, sessionId } = useVoiceStore()
   const { devPhone } = useSettingsStore()
-  const [liveTranscript, setLiveTranscript] = useState('')
+  const [liveTranscript] = useState('')
 
-  const hasSession = !!sessionId
+  const hasSession = !!sessionId && status !== 'ended'
 
   const handleStart = () => {
-    if (!hasSession) {
-      startSession('outbound', devPhone || '+919999999999')
+    if (!hasSession || status === 'ended') {
+      startSession('outbound', devPhone || '+918567890273')
+    } else {
+      startManualListening()
     }
   }
 
@@ -89,7 +91,7 @@ export function VoiceChat() {
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-danger/10 text-danger text-xs hover:bg-danger/20 transition-colors"
             >
               <PhoneOff size={13} />
-              End Session
+              End Call
             </button>
           </div>
         )}

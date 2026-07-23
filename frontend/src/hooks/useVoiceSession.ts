@@ -24,62 +24,84 @@ export function useVoiceSession() {
   )
 
   const startListeningLoop = useCallback(() => {
-    if (store.status === 'ended' || store.status === 'error') return
+    const currentStatus = useVoiceStore.getState().status
+    if (currentStatus === 'ended' || currentStatus === 'error') return
+
     listeningRef.current = true
     store.setStatus('listening')
 
-    speech.startListening(async (text, isFinal, confidence) => {
-      if (!isFinal || !listeningRef.current) return
-      listeningRef.current = false
-      speech.stopListening()
+    speech.startListening(
+      async (text, isFinal, confidence) => {
+        if (!isFinal || !listeningRef.current) return
+        listeningRef.current = false
+        speech.stopListening()
 
-      addMsg('customer', text, { confidence })
-      store.setStatus('thinking')
+        addMsg('customer', text, { confidence })
+        store.setStatus('thinking')
 
-      const sid = useVoiceStore.getState().sessionId
-      if (!sid) return
+        const sid = useVoiceStore.getState().sessionId
+        if (!sid) return
 
-      try {
-        const turn = await sendBrowserTurn(sid, text)
-        store.setLastTurn(turn)
-        store.setLastLatencyMs(turn.latencyMs)
-        store.setCurrentCustomer(turn.customer)
-        store.setCurrentStage(turn.stage)
-        store.setCurrentModel(turn.model)
+        try {
+          const turn = await sendBrowserTurn(sid, text)
+          store.setLastTurn(turn)
+          store.setLastLatencyMs(turn.latencyMs)
+          store.setCurrentCustomer(turn.customer)
+          store.setCurrentStage(turn.stage)
+          store.setCurrentModel(turn.model)
 
-        addMsg('asha', turn.spokenResponse, { latencyMs: turn.latencyMs, stage: turn.stage })
+          addMsg('asha', turn.spokenResponse, { latencyMs: turn.latencyMs, stage: turn.stage })
 
-        if (turn.ended) {
-          store.setStatus('ended')
-          if (settings.autoSpeak) {
-            speech.speak(turn.spokenResponse)
-          }
-          return
-        }
-
-        if (settings.autoSpeak) {
-          store.setStatus('speaking')
-          speech.speak(turn.spokenResponse, () => {
-            if (settings.continuousListening) {
-              startListeningLoop()
-            } else {
-              store.setStatus('idle')
+          if (turn.ended) {
+            store.setStatus('ended')
+            if (settings.autoSpeak) {
+              speech.speak(turn.spokenResponse)
             }
-          })
-        } else {
-          if (settings.continuousListening) {
-            startListeningLoop()
-          } else {
-            store.setStatus('idle')
+            return
           }
+
+          if (settings.autoSpeak) {
+            store.setStatus('speaking')
+            speech.speak(turn.spokenResponse, () => {
+              const latestStatus = useVoiceStore.getState().status
+              if (latestStatus !== 'ended' && latestStatus !== 'error') {
+                if (settings.continuousListening) {
+                  startListeningLoop()
+                } else {
+                  store.setStatus('idle')
+                }
+              }
+            })
+          } else {
+            const latestStatus = useVoiceStore.getState().status
+            if (latestStatus !== 'ended' && latestStatus !== 'error') {
+              if (settings.continuousListening) {
+                startListeningLoop()
+              } else {
+                store.setStatus('idle')
+              }
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Unknown error'
+          toast.error(`Asha error: ${msg}`)
+          store.setStatus('error')
+          addMsg('system', `Error: ${msg}`)
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Unknown error'
-        toast.error(`Asha error: ${msg}`)
-        store.setStatus('error')
-        addMsg('system', `Error: ${msg}`)
+      },
+      () => {
+        // onSilence callback: if recognition ended due to silence, automatically re-arm if call is active
+        const latestStatus = useVoiceStore.getState().status
+        if (listeningRef.current && latestStatus === 'listening') {
+          setTimeout(() => {
+            const s = useVoiceStore.getState().status
+            if (s !== 'ended' && s !== 'error') {
+              startListeningLoop()
+            }
+          }, 300)
+        }
       }
-    })
+    )
   }, [store, speech, addMsg, settings])
 
   const startSession = useCallback(async (direction: 'outbound' | 'inbound' = 'outbound', phone?: string) => {
@@ -138,21 +160,32 @@ export function useVoiceSession() {
         store.setStatus('ended')
       } else if (settings.autoSpeak) {
         store.setStatus('speaking')
-        speech.speak(turn.spokenResponse, () => store.setStatus('idle'))
+        speech.speak(turn.spokenResponse, () => {
+          if (settings.continuousListening) {
+            startListeningLoop()
+          } else {
+            store.setStatus('idle')
+          }
+        })
       } else {
-        store.setStatus('idle')
+        if (settings.continuousListening) {
+          startListeningLoop()
+        } else {
+          store.setStatus('idle')
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       toast.error(msg)
       store.setStatus('error')
     }
-  }, [store, settings, speech, addMsg])
+  }, [store, settings, speech, addMsg, startListeningLoop])
 
   const startManualListening = useCallback(() => {
-    if (store.status === 'listening' || store.status === 'thinking') return
+    listeningRef.current = false
+    speech.stopListening()
     startListeningLoop()
-  }, [store.status, startListeningLoop])
+  }, [speech, startListeningLoop])
 
   const toggleMute = useCallback(() => {
     store.setMuted(!store.isMuted)

@@ -16,14 +16,11 @@ export function MicButton({ status, onStart, onStop, hasSession }: Props) {
   const isSpeaking = status === 'speaking'
   const isConnecting = status === 'connecting'
   const isEnded = status === 'ended'
-  const isIdle = status === 'idle'
 
   const handleClick = () => {
-    if (isListening || isThinking || isSpeaking || isConnecting) {
+    if (isListening || isThinking || isSpeaking) {
       onStop()
-    } else if (isIdle && hasSession) {
-      onStart()
-    } else if (!hasSession && !isConnecting) {
+    } else {
       onStart()
     }
   }
@@ -33,14 +30,14 @@ export function MicButton({ status, onStart, onStop, hasSession }: Props) {
     if (isListening) return 'Listening...'
     if (isThinking) return 'Processing...'
     if (isSpeaking) return 'Asha speaking...'
-    if (isEnded) return 'Session ended'
+    if (isEnded) return 'Start new call'
     if (hasSession) return 'Tap to speak'
-    return 'Start session'
+    return 'Start call'
   }
 
   const getIcon = () => {
     if (isThinking) return <Brain size={32} className="text-white" />
-    if (isEnded) return <MicOff size={32} className="text-gray-400" />
+    if (isEnded) return <MicOff size={32} className="text-gray-300" />
     return <Mic size={32} className="text-white" />
   }
 
@@ -56,7 +53,7 @@ export function MicButton({ status, onStart, onStop, hasSession }: Props) {
     if (isListening) return 'bg-blue-600'
     if (isThinking) return 'bg-violet-600'
     if (isSpeaking) return 'bg-emerald-600'
-    if (isEnded) return 'bg-bg-surface'
+    if (isEnded) return 'bg-accent hover:bg-accent-hover'
     return 'bg-accent hover:bg-accent-hover'
   }
 
@@ -64,10 +61,10 @@ export function MicButton({ status, onStart, onStop, hasSession }: Props) {
     <div className="flex flex-col items-center gap-4">
       <motion.button
         onClick={handleClick}
-        disabled={isEnded}
+        disabled={isConnecting}
         className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-all duration-300 cursor-pointer disabled:cursor-not-allowed ${getBgClass()} ${getRingClass()}`}
         whileTap={{ scale: 0.94 }}
-        whileHover={!isEnded ? { scale: 1.04 } : {}}
+        whileHover={!isConnecting ? { scale: 1.04 } : {}}
       >
         <AnimatePresence mode="wait">
           {isListening && (

@@ -137,6 +137,7 @@ RULES FOR STAGE PROGRESSION:
 2. If the user mentions any human transfer keywords (advisor, human, agent, representative, executive, call me, sales person), immediately suggest transfer.
 3. Skip fields the user already volunteered (e.g. if they say "I have Star Health policy", record 'Star Health' as existing_insurer, and skip the question about existing insurance).
 4. Do not list stages or speak JSON schema to the customer.
+5. DO NOT transition to 'closing' or 'ended' stage early unless the customer explicitly says goodbye, wants to end the call, or refuses to talk. Progress sequentially: greeting -> permission -> need_analysis -> profiling -> recommendation -> closing -> ended.
 
 OUTPUT FORMAT:
 You MUST respond with a JSON object. Do not output any markdown code blocks, backticks, or other text outside the JSON.
@@ -1330,7 +1331,7 @@ async function routeCallGather(request, env, ctx) {
     }
   }
 
-  const isEnding = conversation.stage === STAGES.ENDED || conversation.stage === STAGES.CLOSING || conversation.stage === "ended" || conversation.stage === "closing";
+  const isEnding = conversation.stage === STAGES.ENDED || conversation.stage === "ended";
   
   if (isEnding) {
     ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, callSid));
@@ -1818,7 +1819,7 @@ async function handleBrowserTurn(request, env) {
   conversation.history.push({ role: "asha", text: replyText });
   conversation.lastQuestion = replyText;
 
-  const isEnding = [STAGES.ENDED, STAGES.CLOSING, "ended", "closing"].includes(conversation.stage);
+  const isEnding = conversation.stage === STAGES.ENDED || conversation.stage === "ended";
 
   if (env.DB) {
     try {
