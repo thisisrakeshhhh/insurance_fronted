@@ -1,0 +1,15 @@
+name = "tata-aig-voice-agent"
+main = "src/index.js"
+compatibility_date = "2025-07-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tata_aig_voice_db"
+database_id = "a105e87d-4120-4bba-be39-424d04fff4ab"
+
+[vars]
+ENVIRONMENT = "production"
+GATHER_LANGUAGE = "en-IN"
+SPEECH_TIMEOUT = "auto"
+AGENT_NAME = "Asha"
+COMPANY_NAME = "TATA AIG Health Insurance"
