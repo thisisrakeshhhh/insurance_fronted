@@ -2,7 +2,7 @@ const CONFIG = {
   AGENT_NAME: "Asha",
   COMPANY_NAME: "TATA AIG Health Insurance",
   GATHER_LANGUAGE: "en-IN",
-  GEMINI_MODEL: "gemini-1.5-flash",
+  GEMINI_MODEL: "gemini-2.0-flash",
   OPENAI_MODEL: "gpt-4o-mini",
   MAX_TURNS: 20,
   AI_TIMEOUT_MS: 3000,
@@ -118,6 +118,21 @@ class PerformanceTracker {
       sheetsRequestMs: 0,
       whatsappRequestMs: 0,
       totalRequestMs: 0,
+    };
+    this.aiTrace = {
+      reqId: this.reqId,
+      providerSelected: "none",
+      modelName: "",
+      requestUrl: "",
+      httpStatus: 0,
+      responseBodySnippet: "",
+      latencyMs: 0,
+      timeoutStatus: false,
+      parsedJson: null,
+      validationResult: null,
+      thrownException: null,
+      fallbackReason: null,
+      exactFallbackSourceFunction: null,
     };
   }
 
@@ -672,10 +687,23 @@ function recommendPlan(customer) {
 
 async function callGemini(env, prompt, systemPrompt = "", tracker) {
   const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
+  if (!apiKey) {
+    const err = new Error("GEMINI_API_KEY is not configured in Worker environment secrets.");
+    if (tracker) tracker.aiTrace.thrownException = err.message;
+    throw err;
+  }
+
   let model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL;
-  if (model === "gemini-2.5-flash" || !model) model = "gemini-1.5-flash";
+  if (model === "gemini-1.5-flash" || model === "gemini-2.5-flash" || !model) {
+    model = "gemini-2.0-flash";
+  }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  if (tracker) {
+    tracker.aiTrace.providerSelected = "gemini";
+    tracker.aiTrace.modelName = model;
+    tracker.aiTrace.requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  }
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -683,18 +711,28 @@ async function callGemini(env, prompt, systemPrompt = "", tracker) {
   };
   if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
+  const t0 = Date.now();
   const exec = async () => {
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+
+    if (tracker) {
+      tracker.aiTrace.httpStatus = resp.status;
+      tracker.aiTrace.latencyMs = Date.now() - t0;
+    }
+
     if (!resp.ok) {
       const errText = await resp.text();
+      if (tracker) tracker.aiTrace.responseBodySnippet = errText.slice(0, 300);
       throw new Error(`Gemini API error ${resp.status}: ${errText}`);
     }
     const data = await resp.json();
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    if (tracker) tracker.aiTrace.responseBodySnippet = rawText.slice(0, 300);
+    return rawText;
   };
 
   return tracker ? tracker.measureAsync("geminiApiMs", exec) : exec();
@@ -702,46 +740,93 @@ async function callGemini(env, prompt, systemPrompt = "", tracker) {
 
 async function callOpenAI(env, prompt, systemPrompt = "", tracker) {
   const apiKey = env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
+  if (!apiKey) {
+    const err = new Error("OPENAI_API_KEY is not configured in Worker environment secrets.");
+    if (tracker) tracker.aiTrace.thrownException = err.message;
+    throw err;
+  }
+
   const baseUrl = env.OPENAI_BASE_URL || "https://api.openai.com/v1";
   const model = env.OPENAI_MODEL || CONFIG.OPENAI_MODEL;
+
+  if (tracker) {
+    tracker.aiTrace.providerSelected = "openai";
+    tracker.aiTrace.modelName = model;
+    tracker.aiTrace.requestUrl = `${baseUrl}/chat/completions`;
+  }
 
   const messages = [];
   if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
   messages.push({ role: "user", content: prompt });
 
+  const t0 = Date.now();
   const exec = async () => {
     const resp = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model, messages, temperature: 0.3, max_tokens: 350 }),
     });
+
+    if (tracker) {
+      tracker.aiTrace.httpStatus = resp.status;
+      tracker.aiTrace.latencyMs = Date.now() - t0;
+    }
+
     if (!resp.ok) {
       const errText = await resp.text();
+      if (tracker) tracker.aiTrace.responseBodySnippet = errText.slice(0, 300);
       throw new Error(`OpenAI API error ${resp.status}: ${errText}`);
     }
     const data = await resp.json();
-    return data?.choices?.[0]?.message?.content ?? "";
+    const rawText = data?.choices?.[0]?.message?.content ?? "";
+    if (tracker) tracker.aiTrace.responseBodySnippet = rawText.slice(0, 300);
+    return rawText;
   };
 
   return tracker ? tracker.measureAsync("openaiFallbackMs", exec) : exec();
 }
 
 async function generateAIResponse(env, prompt, systemPrompt = "", tracker) {
-  try {
-    if (env.GEMINI_API_KEY) return await callGemini(env, prompt, systemPrompt, tracker);
-  } catch (err) {
-    log.warn("Gemini AI fetch failed, attempting OpenAI fallback", { error: err.message });
+  let geminiErr = null;
+  let openAiErr = null;
+
+  if (!env.GEMINI_API_KEY && !env.OPENAI_API_KEY) {
+    const msg = "MISSING_KEYS: Neither GEMINI_API_KEY nor OPENAI_API_KEY is configured in Cloudflare Worker environment variables/secrets.";
+    if (tracker) {
+      tracker.aiTrace.thrownException = msg;
+      tracker.aiTrace.fallbackReason = msg;
+    }
+    log.error("AI execution pipeline failed - missing API keys", { reqId: tracker?.reqId });
+    throw new Error(msg);
   }
+
   try {
-    if (env.OPENAI_API_KEY) return await callOpenAI(env, prompt, systemPrompt, tracker);
+    if (env.GEMINI_API_KEY) {
+      return await callGemini(env, prompt, systemPrompt, tracker);
+    }
   } catch (err) {
-    log.error("OpenAI fallback failed as well", { error: err.message });
+    geminiErr = err.message;
+    if (tracker) tracker.aiTrace.thrownException = `Gemini Exception: ${err.message}`;
+    log.warn("Gemini AI fetch failed, attempting OpenAI fallback", { error: err.message, stack: err.stack });
   }
-  throw new Error("No configured AI providers responded successfully.");
+
+  try {
+    if (env.OPENAI_API_KEY) {
+      return await callOpenAI(env, prompt, systemPrompt, tracker);
+    }
+  } catch (err) {
+    openAiErr = err.message;
+    if (tracker) tracker.aiTrace.thrownException += ` | OpenAI Exception: ${err.message}`;
+    log.error("OpenAI fallback failed as well", { error: err.message, stack: err.stack });
+  }
+
+  const combinedErr = `All AI providers failed. Gemini: ${geminiErr || "not configured"}, OpenAI: ${openAiErr || "not configured"}`;
+  if (tracker) tracker.aiTrace.fallbackReason = combinedErr;
+  throw new Error(combinedErr);
 }
 
 function extractJson(text) {
+  if (!text || typeof text !== "string") return null;
   try {
     const start = text.indexOf("{");
     if (start === -1) return null;
@@ -810,7 +895,12 @@ function getLocalFallbackResponse(speech, stage) {
   return "I apologize, but I am facing a temporary network issue. Could you please repeat that, or should I arrange for a representative to call you back?";
 }
 
-function buildLocalFallbackResult(conversation, speechResult) {
+function buildLocalFallbackResult(conversation, speechResult, tracker, reason, sourceFn) {
+  if (tracker) {
+    tracker.aiTrace.fallbackReason = reason;
+    tracker.aiTrace.exactFallbackSourceFunction = sourceFn;
+  }
+  log.error(`Fallback triggered at ${sourceFn}`, { reason, reqId: tracker?.reqId });
   return {
     extractedFields: {},
     detectedIntent: conversation.intent || INTENTS.UNKNOWN,
@@ -819,6 +909,7 @@ function buildLocalFallbackResult(conversation, speechResult) {
     wantsHuman: TRANSFER_KEYWORDS.some((k) => speechResult.toLowerCase().includes(k)),
     spokenResponse: getLocalFallbackResponse(speechResult, conversation.stage),
     callSummary: conversation.summary || "",
+    debugTrace: tracker?.aiTrace || null,
   };
 }
 
@@ -832,22 +923,36 @@ async function getTurnResponse(env, conversationState, speechResult, tracker) {
     : buildUserPrompt(speechResult, conversationState.history);
 
   const AI_TIMEOUT_MARKER = Symbol("timeout");
+  let rawAiText = "";
+
   const aiPromise = (async () => {
-    const aiText = await generateAIResponse(env, userPrompt, systemPrompt, tracker);
-    return tracker ? tracker.measure("jsonExtractionMs", () => extractJson(aiText)) : extractJson(aiText);
+    const aiRes = await generateAIResponse(env, userPrompt, systemPrompt, tracker);
+    rawAiText = typeof aiRes === "object" ? aiRes.text : aiRes;
+    const parsed = tracker ? tracker.measure("jsonExtractionMs", () => extractJson(rawAiText)) : extractJson(rawAiText);
+    if (tracker) tracker.aiTrace.parsedJson = parsed;
+    return parsed;
   })().catch((err) => {
-    log.error("AI turn generation failed", { error: err.message });
+    log.error("getTurnResponse: AI generation threw error", { error: err.message, stack: err.stack, reqId: tracker?.reqId });
+    if (tracker) tracker.aiTrace.thrownException = err.message;
     return null;
   });
 
   const result = await withTimeout(aiPromise, CONFIG.AI_TIMEOUT_MS, AI_TIMEOUT_MARKER);
 
-  if (result === AI_TIMEOUT_MARKER || !result || !result.spokenResponse) {
-    if (result === AI_TIMEOUT_MARKER) log.warn("AI turn timed out, using rule-based fallback", { stage: conversationState.stage });
-    return buildLocalFallbackResult(conversationState, speechResult);
+  if (result === AI_TIMEOUT_MARKER) {
+    if (tracker) tracker.aiTrace.timeoutStatus = true;
+    log.warn("getTurnResponse: AI turn timed out", { ms: CONFIG.AI_TIMEOUT_MS, stage: conversationState.stage });
+    return buildLocalFallbackResult(conversationState, speechResult, tracker, "AI_TIMEOUT_EXCEEDED", "getTurnResponse()");
   }
 
-  result.spokenResponse = validateResponse(result.spokenResponse);
+  if (!result || !result.spokenResponse) {
+    const failReason = !result ? `extractJson returned null for text: ${rawAiText.slice(0, 100)}` : "result.spokenResponse missing or empty";
+    return buildLocalFallbackResult(conversationState, speechResult, tracker, failReason, "getTurnResponse()");
+  }
+
+  const validatedText = validateResponse(result.spokenResponse);
+  if (tracker) tracker.aiTrace.validationResult = validatedText;
+  result.spokenResponse = validatedText;
   result.extractedFields = result.extractedFields || {};
   return result;
 }
@@ -1755,6 +1860,7 @@ function jsonResponse(data, status = 200, reqOrigin, tracker) {
     headers["X-Request-Id"] = metrics.reqId;
     if (typeof data === "object" && data !== null) {
       data.timings = metrics;
+      data.aiTrace = tracker.aiTrace;
     }
   }
   return new Response(JSON.stringify(data), { status, headers });
@@ -1840,7 +1946,7 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
   }
 
   const metrics = tracker.finish();
-  log.info("Request Performance Summary", metrics);
+  log.info("Request Performance & AI Trace Summary", { metrics, aiTrace: tracker.aiTrace });
 
   return jsonResponse(
     {
@@ -1860,6 +1966,7 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
       latencyMs: metrics.totalRequestMs,
       model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
       timings: metrics,
+      aiTrace: tracker.aiTrace,
     },
     200,
     reqOrigin,
