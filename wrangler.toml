@@ -13,3 +13,8 @@ GATHER_LANGUAGE = "en-IN"
 SPEECH_TIMEOUT = "auto"
 AGENT_NAME = "Asha"
 COMPANY_NAME = "TATA AIG Health Insurance"
+SKIP_TWILIO_VALIDATION = "true"
+WORKER_ORIGIN = "https://tata-aig-voice-agent.whatsappai.workers.dev"
+
+[triggers]
+crons = ["*/15 * * * *"]
