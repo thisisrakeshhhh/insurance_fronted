@@ -1,44 +1,18 @@
-/**
- * ═══════════════════════════════════════════════════════════════════════════════
- *  TATA AIG Health Insurance Voice Agent — "Asha"
- *  Production-ready single-file Cloudflare Worker  (v3.0.0 - Optimized)
- *
- *  WHAT CHANGED FROM v2.0.0:
- *   1. Call flow is now a deterministic JS state machine (computeNextStage).
- *      The AI model is ONLY used to extract fields, detect intent/objection,
- *      and phrase the spoken sentence — it never decides what stage comes next.
- *   2. Every /voice/* webhook verifies the X-Twilio-Signature header before
- *      touching the DB or calling the AI (bypassable with SKIP_TWILIO_VALIDATION="true").
- *   3. AI calls are wrapped in a hard 3.0s timeout + race; if the model is slow
- *      the turn falls back instantly to a rule-based reply.
- *   4. Appointments and callbacks tables are written to:
- *        - confirmed appointment slots -> `appointments`
- *        - no-answer / busy outbound calls -> scheduled retry in `callbacks`,
- *          drained by a `scheduled()` Cron handler.
- *   5. A MAX_TURNS safety valve forces the call to closing/hangup instead of looping.
- * ═══════════════════════════════════════════════════════════════════════════════
- */
-
-// =============================================================================
-// SECTION 1 — CONFIGURATION & CONSTANTS
-// =============================================================================
-
 const CONFIG = {
   AGENT_NAME: "Asha",
   COMPANY_NAME: "TATA AIG Health Insurance",
   GATHER_LANGUAGE: "en-IN",
   GEMINI_MODEL: "gemini-1.5-flash",
   OPENAI_MODEL: "gpt-4o-mini",
-  MAX_TURNS: 20,              // hard safety valve — forces closing after this many turns
-  AI_TIMEOUT_MS: 3000,        // hard 3.0s timeout for ultra-fast turn taking
-  GATHER_TIMEOUT_SEC: "7",    // seconds of silence before Twilio ends the Gather
-  MAX_OBJECTIONS: 3,          // after this many unresolved objections, move to closing
-  CALLBACK_RETRY_MINUTES: 30, // how long to wait before retrying a no-answer/busy outbound call
+  MAX_TURNS: 20,
+  AI_TIMEOUT_MS: 3000,
+  GATHER_TIMEOUT_SEC: "7",
+  MAX_OBJECTIONS: 3,
+  CALLBACK_RETRY_MINUTES: 30,
   MAX_CALLBACK_ATTEMPTS: 3,
 };
 
 const STAGES = {
-  // Outbound stages
   GREETING: "greeting",
   PERMISSION: "permission",
   NEED_ANALYSIS: "need_analysis",
@@ -48,8 +22,6 @@ const STAGES = {
   APPOINTMENT: "appointment",
   CLOSING: "closing",
   ENDED: "ended",
-
-  // Inbound stages
   WELCOME: "welcome",
   INTENT_SELECTION: "intent_selection",
   BUY_POLICY: "buy_policy",
@@ -74,7 +46,6 @@ const INTENTS = {
   UNKNOWN: "unknown",
 };
 
-// maps a detected inbound intent to the stage that should own the conversation
 const INTENT_TO_STAGE = {
   [INTENTS.BUY_POLICY]: STAGES.BUY_POLICY,
   [INTENTS.RENEWAL]: STAGES.RENEWAL,
@@ -123,100 +94,88 @@ const EXPLICIT_END_REGEX = /\b(bye|goodbye|that'?s all|no more questions|hang up
 const PERMISSION_DENIED_REGEX = /\b(not now|no time|can'?t talk|busy right now|call (me )?later|abhi nahi|busy hu|later)\b/i;
 const TRANSFER_KEYWORDS = ["advisor", "human", "agent", "representative", "executive", "call me", "sales person", "baat kar", "operator"];
 
-// =============================================================================
-// SECTION 2 — PROMPTS & DOMAIN KNOWLEDGE
-// =============================================================================
+class PerformanceTracker {
+  constructor() {
+    this.reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    this.t0 = Date.now();
+    this.metrics = {
+      reqId: this.reqId,
+      requestParsingMs: 0,
+      sessionLookupMs: 0,
+      customerLookupMs: 0,
+      historyLookupMs: 0,
+      promptConstructionMs: 0,
+      geminiApiMs: 0,
+      openaiFallbackMs: 0,
+      jsonExtractionMs: 0,
+      stateMachineMs: 0,
+      leadScoringMs: 0,
+      planRecommendationMs: 0,
+      dbReadsMs: 0,
+      dbWritesMs: 0,
+      appointmentSavingMs: 0,
+      callbackSchedulingMs: 0,
+      sheetsRequestMs: 0,
+      whatsappRequestMs: 0,
+      totalRequestMs: 0,
+    };
+  }
 
-const ASHA_PERSONALITY = `
-You are Asha, a warm, professional, and empathetic health insurance advisor at TATA AIG Health Insurance.
-Personality traits:
-- Warm, caring, professional, friendly, patient, natural, confident, and human-like.
-- Never sound robotic or scripted. Speak naturally like a real human advisor on a phone call.
-- Keep every spoken response short (1-2 sentences maximum).
-- Support English, Hindi, Hinglish, and Kannada. Automatically detect language and switch naturally.
-`.trim();
+  measure(key, fn) {
+    const start = Date.now();
+    try {
+      const res = fn();
+      this.metrics[key] = (this.metrics[key] || 0) + (Date.now() - start);
+      return res;
+    } catch (err) {
+      this.metrics[key] = (this.metrics[key] || 0) + (Date.now() - start);
+      throw err;
+    }
+  }
 
-const INSURANCE_KNOWLEDGE = `
-TATA AIG Health Insurance Knowledge:
-- 7,000+ cashless hospitals across India.
-- Tax Deductions: Premium deductible under Section 80D up to ₹25,000 (self/family) + ₹25,000/₹50,000 (parents).
-- Plans:
-  1. Medicare Individual Plan: Age 18-65. Individual coverage. Premium range: ₹8,000-₹32,000/year.
-  2. Medicare Family Floater: Shared sum insured for spouse + children. Premium range: ₹12,000-₹45,000/year.
-  3. Senior Citizen Plan: Age 60-80. Covers pre-existing diseases after waiting period. Premium: ₹35,000-₹45,000/year.
-  4. Critical Illness Plan: Lump sum payout for 36 illnesses. Premium: ₹5,000-₹25,000/year.
-  5. Super Top-Up Plan: Extra cover above existing base deductible. Premium: ₹3,000-₹15,000/year.
-- Claims: Cashless at network hospital and Reimbursement in 7-14 days.
-`.trim();
+  async measureAsync(key, fn) {
+    const start = Date.now();
+    try {
+      const res = await fn();
+      this.metrics[key] = (this.metrics[key] || 0) + (Date.now() - start);
+      return res;
+    } catch (err) {
+      this.metrics[key] = (this.metrics[key] || 0) + (Date.now() - start);
+      throw err;
+    }
+  }
+
+  finish() {
+    this.metrics.totalRequestMs = Date.now() - this.t0;
+    return this.metrics;
+  }
+}
+
+const ASHA_PERSONALITY = `You are Asha, a warm, professional, and empathetic health insurance advisor at TATA AIG Health Insurance. Speak naturally in 1-2 short sentences.`;
+
+const INSURANCE_KNOWLEDGE = `TATA AIG Health: 7,000+ cashless hospitals. Tax Deductions under 80D up to ₹25k-₹75k. Medicare Individual, Medicare Family, Senior Citizen, Critical Illness, Super Top-Up.`;
 
 function buildAshaSystemPrompt(conversation, direction) {
   const isOutbound = direction === CALL_DIRECTION.OUTBOUND;
-
-  return `
-${ASHA_PERSONALITY}
-
+  return `${ASHA_PERSONALITY}
 ${INSURANCE_KNOWLEDGE}
-
-CONVERSATION CONTEXT:
-- Direction: ${direction} (${isOutbound ? "outbound sales call" : "inbound customer support"})
-- Current Stage: ${conversation.stage}
-- Customer Profile: ${JSON.stringify(conversation.customer)}
-- Missing Profile Fields: ${JSON.stringify(conversation.missingFields)}
-- Current detected intent: ${conversation.intent}
-
+CONTEXT: Direction: ${direction} (${isOutbound ? "outbound" : "inbound"}), Stage: ${conversation.stage}, Profile: ${JSON.stringify(conversation.customer)}, Missing: ${JSON.stringify(conversation.missingFields)}
 RULES:
-1. Reply naturally to what the customer just said, appropriate for the CURRENT stage. A separate system controls stage transitions.
-2. If the user mentions human transfer keywords, set wantsHuman to true.
-3. Skip fields the user already volunteered (e.g. if they say "I have Star Health policy", record 'Star Health' as existing_insurer).
-4. CRITICAL: 'spokenResponse' MUST be pure natural conversational speech (1-2 short friendly sentences). NEVER include JSON, code, brackets, or schema names in spokenResponse.
-5. If stage is "profiling", ask for ONE missing field at a time from: ${JSON.stringify(conversation.missingFields)}.
-6. If stage is "appointment", try to pin down a concrete day/time and put it in extractedFields.appointment_datetime.
-
-OUTPUT FORMAT:
-You MUST respond with a JSON object only. No markdown, no backticks, no extra text.
-{
-  "extractedFields": {
-     "name": string | null,
-     "email": string | null,
-     "age": number | null,
-     "city": string | null,
-     "pincode": string | null,
-     "family_members": number | null,
-     "existing_insurer": string | null,
-     "renewal_date": string | null,
-     "medical_history": string | null,
-     "budget": string | null,
-     "buying_timeline": string | null,
-     "appointment_datetime": string | null
-  },
-  "detectedIntent": string,
-  "intentConfidence": number,
-  "objectionType": string | null,
-  "wantsHuman": boolean,
-  "spokenResponse": "your natural spoken reply as Asha (1-2 sentences max)",
-  "callSummary": "brief summary of conversation"
-}
-`.trim();
+1. Reply naturally for CURRENT stage.
+2. Set wantsHuman if human transfer keywords mentioned.
+3. CRITICAL: spokenResponse MUST be 1-2 short friendly sentences. NO JSON or code in spokenResponse.
+4. If profiling, ask for ONE missing field from: ${JSON.stringify(conversation.missingFields)}.
+OUTPUT FORMAT: JSON only
+{"extractedFields":{"name":null,"email":null,"age":null,"city":null,"pincode":null,"family_members":null,"existing_insurer":null,"renewal_date":null,"medical_history":null,"budget":null,"buying_timeline":null,"appointment_datetime":null},"detectedIntent":"buy_policy","intentConfidence":0.9,"objectionType":null,"wantsHuman":false,"spokenResponse":"text","callSummary":"summary"}`;
 }
 
 function buildUserPrompt(speechResult, history) {
   let histText = "";
   if (history && history.length > 0) {
-    histText = history.slice(-6).map((h) => `${h.role === "asha" ? "Asha" : "Customer"}: ${h.text}`).join("\n");
+    histText = history.slice(-4).map((h) => `${h.role === "asha" ? "Asha" : "Customer"}: ${h.text}`).join("\n");
   }
-  return `
-Recent Chat History:
-${histText}
-
-Customer just said: "${speechResult}"
-
-Analyze context, update fields, detect intent, and generate the JSON response.
-`.trim();
+  return `Chat History:\n${histText}\nCustomer: "${speechResult}"\nAnalyze context and return JSON.`;
 }
-
-// =============================================================================
-// SECTION 3 — LOGGER & UTILITIES
-// =============================================================================
 
 function createLogger(module = "app") {
   const prefix = `[${module}]`;
@@ -264,10 +223,6 @@ async function withTimeout(promise, ms, fallbackValue) {
   }
 }
 
-// =============================================================================
-// SECTION 4 — TWIML XML HELPERS
-// =============================================================================
-
 function escapeXml(str = "") {
   return String(str)
     .replace(/&/g, "&amp;")
@@ -308,10 +263,6 @@ function sayAndDial({ text, dialNumber, voice = "Polly.Aditi" }) {
   return new Response(xml, { headers: { "Content-Type": "text/xml" } });
 }
 
-// =============================================================================
-// SECTION 5 — TWILIO REQUEST SIGNATURE VALIDATION
-// =============================================================================
-
 async function verifyTwilioSignature(request, authToken, fullUrl, params) {
   const signature = request.headers.get("X-Twilio-Signature");
   if (!signature || !authToken) return false;
@@ -341,8 +292,8 @@ function formDataToObject(form) {
 }
 
 function requireTwilioSignature(handler) {
-  return async (request, env, ctx) => {
-    const form = await request.formData();
+  return async (request, env, ctx, tracker) => {
+    const form = await tracker.measureAsync("requestParsingMs", () => request.formData());
     const params = formDataToObject(form);
 
     if (env.SKIP_TWILIO_VALIDATION !== "true") {
@@ -353,13 +304,9 @@ function requireTwilioSignature(handler) {
         return new Response("Forbidden", { status: 403 });
       }
     }
-    return handler(form, request, env, ctx);
+    return handler(form, request, env, ctx, tracker);
   };
 }
-
-// =============================================================================
-// SECTION 6 — DYNAMIC MODELS
-// =============================================================================
 
 function getMissingFields(customer) {
   const fields = [
@@ -406,14 +353,14 @@ function calculateLeadScoreAndTier(conversation) {
   const med = (profile.medical_history || "").toLowerCase();
   if (med && med !== "none" && med !== "no" && med !== "nil") {
     score += 10;
-    reasons.push("Existing medical conditions (high need)");
+    reasons.push("Existing medical conditions");
   }
 
   const insurer = (profile.existing_insurer || "").toLowerCase();
   const renewal = (profile.renewal_date || "").toLowerCase();
   if (insurer && insurer !== "none" && insurer !== "no" && insurer !== "") {
     score += 10;
-    reasons.push("Has existing insurance (portability option)");
+    reasons.push("Has existing insurance");
   }
   if (renewal && renewal !== "none" && renewal !== "no" && renewal !== "") {
     score += 10;
@@ -422,7 +369,7 @@ function calculateLeadScoreAndTier(conversation) {
 
   if ((conversation.turnCount || 0) > 5) {
     score += 10;
-    reasons.push("Highly engaged (longer call)");
+    reasons.push("Highly engaged");
   }
   if (conversation.quote) {
     score += 10;
@@ -434,11 +381,10 @@ function calculateLeadScoreAndTier(conversation) {
   }
   if (conversation.appointmentBooked) {
     score += 15;
-    reasons.push("Booked an appointment");
+    reasons.push("Booked appointment");
   }
 
   score = Math.min(score, 100);
-
   let tier = LEAD_TIERS.COLD;
   if (score >= 70) tier = LEAD_TIERS.HOT;
   else if (score >= 40) tier = LEAD_TIERS.WARM;
@@ -446,10 +392,6 @@ function calculateLeadScoreAndTier(conversation) {
 
   return { score, tier, reasons };
 }
-
-// =============================================================================
-// SECTION 7 — INTEGRATION UTILITIES
-// =============================================================================
 
 async function makeOutboundCall(env, { to, from, twimlUrl, statusCallback }) {
   const accountSid = env.TWILIO_ACCOUNT_SID;
@@ -499,13 +441,12 @@ async function startCallRecording(env, callSid) {
       },
       body: new URLSearchParams({ RecordingStatusCallbackEvent: "completed" }),
     });
-    log.info("Call recording triggered", { callSid });
   } catch (err) {
     log.error("Failed to start call recording", { callSid, error: err.message });
   }
 }
 
-async function triggerWhatsAppByIntent(env, phone, intent, quote) {
+async function triggerWhatsAppByIntent(env, phone, intent, quote, tracker) {
   let docs = [];
   if (intent === INTENTS.RENEWAL) docs = ["brochure", "tax_benefit_guide"];
   else if (intent === INTENTS.CLAIMS) docs = ["claim_guide"];
@@ -513,12 +454,14 @@ async function triggerWhatsAppByIntent(env, phone, intent, quote) {
   else if (intent === INTENTS.BUY_POLICY || intent === "buy") docs = ["brochure", "proposal_form", "kyc_upload"];
   else docs = ["brochure"];
 
-  log.info("Triggering WhatsApp documents", { phone, intent, docs });
   const results = {};
-  results.docs = await sendWhatsAppDocuments(env, phone, docs);
+  const runDocs = async () => sendWhatsAppDocuments(env, phone, docs);
+  results.docs = tracker ? await tracker.measureAsync("whatsappRequestMs", runDocs) : await runDocs();
+
   if (quote && (intent === INTENTS.BUY_POLICY || intent === "buy")) {
     const quoteText = `${quote.planName} — Coverage: ${quote.coverage}, Premium: ${quote.premiumRange}`;
-    results.quote = await sendQuoteSummary(env, phone, quoteText);
+    const runQuote = async () => sendQuoteSummary(env, phone, quoteText);
+    results.quote = tracker ? await tracker.measureAsync("whatsappRequestMs", runQuote) : await runQuote();
   }
   return results;
 }
@@ -553,44 +496,25 @@ async function sendQuoteSummary(env, phone, quoteText) {
   return sendWhatsAppText(env, phone, `Hi, this is Asha from TATA AIG Health Insurance. Your requested plan quotation details:\n${quoteText}`);
 }
 
-function findCashlessHospital(city) {
-  const key = (city || "").toLowerCase().trim();
-  const list = CASHLESS_NETWORK[key];
-  if (!list) {
-    return {
-      found: false,
-      message: `I don't have the network list for ${city} handy, but I will send our full Cashless Hospital Network locator booklet to your WhatsApp.`,
-    };
-  }
-  return {
-    found: true,
-    hospitals: list,
-    message: `In ${city}, our cashless network includes ${list.slice(0, 2).join(" and ")}, among other major hospitals.`,
-  };
-}
-
-async function pushToSheets(env, row) {
+async function pushToSheets(env, row, tracker) {
   if (!env.GOOGLE_SHEETS_WEBHOOK_URL) {
-    log.info("Google Sheets CRM webhook not configured, skipping sync.");
     return { skipped: true };
   }
-  try {
-    const resp = await fetch(env.GOOGLE_SHEETS_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(row),
-    });
-    log.info("CRM Sheets Sync Status", { status: resp.status });
-    return { ok: resp.ok, status: resp.status };
-  } catch (err) {
-    log.error("Google Sheets CRM webhook failed", { error: err.message });
-    return { ok: false, error: err.message };
-  }
+  const runReq = async () => {
+    try {
+      const resp = await fetch(env.GOOGLE_SHEETS_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(row),
+      });
+      return { ok: resp.ok, status: resp.status };
+    } catch (err) {
+      log.error("Google Sheets CRM webhook failed", { error: err.message });
+      return { ok: false, error: err.message };
+    }
+  };
+  return tracker ? tracker.measureAsync("sheetsRequestMs", runReq) : runReq();
 }
-
-// =============================================================================
-// SECTION 8 — THE STATE MACHINE (JS-owned call flow)
-// =============================================================================
 
 function computeNextStage(conversation, aiResult, speechResult) {
   const { stage, direction, missingFields, objectionCount, quote, turnCount } = conversation;
@@ -603,79 +527,58 @@ function computeNextStage(conversation, aiResult, speechResult) {
     switch (stage) {
       case STAGES.GREETING:
         return STAGES.PERMISSION;
-
       case STAGES.PERMISSION:
         if (PERMISSION_DENIED_REGEX.test(speechResult)) return STAGES.CLOSING;
         return STAGES.NEED_ANALYSIS;
-
       case STAGES.NEED_ANALYSIS:
         return STAGES.PROFILING;
-
       case STAGES.PROFILING:
         return missingFields.length === 0 ? STAGES.RECOMMENDATION : STAGES.PROFILING;
-
       case STAGES.RECOMMENDATION:
         return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
-
       case STAGES.OBJECTION_HANDLING:
         if (objectionCount + (aiResult.objectionType ? 1 : 0) >= CONFIG.MAX_OBJECTIONS) return STAGES.CLOSING;
         return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
-
       case STAGES.APPOINTMENT:
         return aiResult.extractedFields && aiResult.extractedFields.appointment_datetime ? STAGES.CLOSING : STAGES.APPOINTMENT;
-
       case STAGES.CLOSING:
         return STAGES.ENDED;
-
       default:
         return stage;
     }
   }
 
-  // ----- Inbound flow -----
   switch (stage) {
     case STAGES.WELCOME:
     case STAGES.INTENT_SELECTION: {
       const intent = aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN ? aiResult.detectedIntent : conversation.intent;
       return INTENT_TO_STAGE[intent] || STAGES.INTENT_SELECTION;
     }
-
     case STAGES.BUY_POLICY:
       if (missingFields.length === 0) return quote ? STAGES.RECOMMENDATION : STAGES.PROFILING;
       return STAGES.PROFILING;
-
     case STAGES.PROFILING:
       if (missingFields.length > 0) return STAGES.PROFILING;
       return STAGES.RECOMMENDATION;
-
     case STAGES.RECOMMENDATION:
       if (aiResult.objectionType) return STAGES.OBJECTION_HANDLING;
       return STAGES.APPOINTMENT;
-
     case STAGES.OBJECTION_HANDLING:
       if (objectionCount + (aiResult.objectionType ? 1 : 0) >= CONFIG.MAX_OBJECTIONS) return STAGES.CLOSING;
       return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
-
     case STAGES.APPOINTMENT:
       return aiResult.extractedFields && aiResult.extractedFields.appointment_datetime ? STAGES.CLOSING : STAGES.APPOINTMENT;
-
     case STAGES.RENEWAL:
     case STAGES.CLAIMS:
     case STAGES.HOSPITAL:
     case STAGES.POLICY_QUESTIONS:
       return stage;
-
     case STAGES.CLOSING:
       return STAGES.ENDED;
-
     default:
       return stage;
   }
 }
-
-// =============================================================================
-// SECTION 9 — RECOMMENDATION ENGINE
-// =============================================================================
 
 const RECOMMENDATION_PLANS = [
   {
@@ -767,11 +670,7 @@ function recommendPlan(customer) {
   };
 }
 
-// =============================================================================
-// SECTION 10 — AI SERVICE (GEMINI + OPENAI FALLBACK, TIMEOUT-BOUNDED)
-// =============================================================================
-
-async function callGemini(env, prompt, systemPrompt = "") {
+async function callGemini(env, prompt, systemPrompt = "", tracker) {
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
   let model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL;
@@ -784,21 +683,24 @@ async function callGemini(env, prompt, systemPrompt = "") {
   };
   if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const exec = async () => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`Gemini API error ${resp.status}: ${errText}`);
+    }
+    const data = await resp.json();
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  };
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Gemini API error ${resp.status}: ${errText}`);
-  }
-  const data = await resp.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  return tracker ? tracker.measureAsync("geminiApiMs", exec) : exec();
 }
 
-async function callOpenAI(env, prompt, systemPrompt = "") {
+async function callOpenAI(env, prompt, systemPrompt = "", tracker) {
   const apiKey = env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
   const baseUrl = env.OPENAI_BASE_URL || "https://api.openai.com/v1";
@@ -808,28 +710,31 @@ async function callOpenAI(env, prompt, systemPrompt = "") {
   if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
   messages.push({ role: "user", content: prompt });
 
-  const resp = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, temperature: 0.3, max_tokens: 350 }),
-  });
+  const exec = async () => {
+    const resp = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, messages, temperature: 0.3, max_tokens: 350 }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`OpenAI API error ${resp.status}: ${errText}`);
+    }
+    const data = await resp.json();
+    return data?.choices?.[0]?.message?.content ?? "";
+  };
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`OpenAI API error ${resp.status}: ${errText}`);
-  }
-  const data = await resp.json();
-  return data?.choices?.[0]?.message?.content ?? "";
+  return tracker ? tracker.measureAsync("openaiFallbackMs", exec) : exec();
 }
 
-async function generateAIResponse(env, prompt, systemPrompt = "") {
+async function generateAIResponse(env, prompt, systemPrompt = "", tracker) {
   try {
-    if (env.GEMINI_API_KEY) return await callGemini(env, prompt, systemPrompt);
+    if (env.GEMINI_API_KEY) return await callGemini(env, prompt, systemPrompt, tracker);
   } catch (err) {
     log.warn("Gemini AI fetch failed, attempting OpenAI fallback", { error: err.message });
   }
   try {
-    if (env.OPENAI_API_KEY) return await callOpenAI(env, prompt, systemPrompt);
+    if (env.OPENAI_API_KEY) return await callOpenAI(env, prompt, systemPrompt, tracker);
   } catch (err) {
     log.error("OpenAI fallback failed as well", { error: err.message });
   }
@@ -917,14 +822,19 @@ function buildLocalFallbackResult(conversation, speechResult) {
   };
 }
 
-async function getTurnResponse(env, conversationState, speechResult) {
-  const systemPrompt = buildAshaSystemPrompt(conversationState, conversationState.direction);
-  const userPrompt = buildUserPrompt(speechResult, conversationState.history);
+async function getTurnResponse(env, conversationState, speechResult, tracker) {
+  const systemPrompt = tracker
+    ? tracker.measure("promptConstructionMs", () => buildAshaSystemPrompt(conversationState, conversationState.direction))
+    : buildAshaSystemPrompt(conversationState, conversationState.direction);
+
+  const userPrompt = tracker
+    ? tracker.measure("historyLookupMs", () => buildUserPrompt(speechResult, conversationState.history))
+    : buildUserPrompt(speechResult, conversationState.history);
 
   const AI_TIMEOUT_MARKER = Symbol("timeout");
   const aiPromise = (async () => {
-    const aiText = await generateAIResponse(env, userPrompt, systemPrompt);
-    return extractJson(aiText);
+    const aiText = await generateAIResponse(env, userPrompt, systemPrompt, tracker);
+    return tracker ? tracker.measure("jsonExtractionMs", () => extractJson(aiText)) : extractJson(aiText);
   })().catch((err) => {
     log.error("AI turn generation failed", { error: err.message });
     return null;
@@ -942,20 +852,19 @@ async function getTurnResponse(env, conversationState, speechResult) {
   return result;
 }
 
-// =============================================================================
-// SECTION 11 — DATABASE CONTROLLER HELPERS
-// =============================================================================
-
-async function dbGetOrCreateCustomer(db, phone) {
-  let cust = await db.prepare("SELECT * FROM customers WHERE phone = ?").bind(phone).first();
-  if (!cust) {
-    await db.prepare("INSERT INTO customers (phone) VALUES (?)").bind(phone).run();
-    cust = await db.prepare("SELECT * FROM customers WHERE phone = ?").bind(phone).first();
-  }
-  return cust;
+async function dbGetOrCreateCustomer(db, phone, tracker) {
+  const exec = async () => {
+    let cust = await db.prepare("SELECT * FROM customers WHERE phone = ?").bind(phone).first();
+    if (!cust) {
+      await db.prepare("INSERT INTO customers (phone) VALUES (?)").bind(phone).run();
+      cust = await db.prepare("SELECT * FROM customers WHERE phone = ?").bind(phone).first();
+    }
+    return cust;
+  };
+  return tracker ? tracker.measureAsync("customerLookupMs", exec) : exec();
 }
 
-async function dbUpdateCustomer(db, phone, customerData) {
+async function dbUpdateCustomer(db, phone, customerData, tracker) {
   const allFields = {
     name: customerData.name || null,
     email: customerData.email || null,
@@ -972,47 +881,54 @@ async function dbUpdateCustomer(db, phone, customerData) {
   };
   const entries = Object.entries(allFields).filter(([, v]) => v !== null);
   if (entries.length === 0) return;
-  const setClause = entries.map(([k]) => `${k} = ?`).join(", ");
-  const values = entries.map(([, v]) => v);
-  await db.prepare(`UPDATE customers SET ${setClause} WHERE phone = ?`).bind(...values, phone).run();
+
+  const exec = async () => {
+    const setClause = entries.map(([k]) => `${k} = ?`).join(", ");
+    const values = entries.map(([, v]) => v);
+    await db.prepare(`UPDATE customers SET ${setClause} WHERE phone = ?`).bind(...values, phone).run();
+  };
+  return tracker ? tracker.measureAsync("dbWritesMs", exec) : exec();
 }
 
-async function dbLogConversationTurn(db, callSid, speaker, message, stage) {
-  await db.prepare("INSERT INTO conversation_logs (call_sid, speaker, message, stage) VALUES (?, ?, ?, ?)").bind(callSid, speaker, message, stage).run();
+async function dbLogConversationTurn(db, callSid, speaker, message, stage, tracker) {
+  const exec = async () => {
+    await db.prepare("INSERT INTO conversation_logs (call_sid, speaker, message, stage) VALUES (?, ?, ?, ?)").bind(callSid, speaker, message, stage).run();
+  };
+  return tracker ? tracker.measureAsync("dbWritesMs", exec) : exec();
 }
 
-async function dbSaveAppointment(env, customerId, phone, appointmentDatetime, notes) {
+async function dbSaveAppointment(env, customerId, phone, appointmentDatetime, notes, tracker) {
   if (!env.DB) return;
-  try {
-    await env.DB.prepare(
-      "INSERT INTO appointments (customer_id, phone, appointment_time, notes, status) VALUES (?, ?, ?, ?, 'scheduled')"
-    ).bind(customerId || null, phone, appointmentDatetime, notes || "").run();
-  } catch (e) {
-    log.error("D1 save appointment error", { error: e.message });
-  }
+  const exec = async () => {
+    try {
+      await env.DB.prepare(
+        "INSERT INTO appointments (customer_id, phone, appointment_time, notes, status) VALUES (?, ?, ?, ?, 'scheduled')"
+      ).bind(customerId || null, phone, appointmentDatetime, notes || "").run();
+    } catch (e) {
+      log.error("D1 save appointment error", { error: e.message });
+    }
+  };
+  return tracker ? tracker.measureAsync("appointmentSavingMs", exec) : exec();
 }
 
-async function dbScheduleCallback(env, phone, reason, attemptCount = 1) {
+async function dbScheduleCallback(env, phone, reason, attemptCount = 1, tracker) {
   if (!env.DB) return;
-  if (attemptCount > CONFIG.MAX_CALLBACK_ATTEMPTS) {
-    log.info("Max callback attempts reached, not rescheduling", { phone, attemptCount });
-    return;
-  }
+  if (attemptCount > CONFIG.MAX_CALLBACK_ATTEMPTS) return;
   const retryAt = new Date(Date.now() + CONFIG.CALLBACK_RETRY_MINUTES * 60 * 1000).toISOString();
-  try {
-    await env.DB.prepare(
-      "INSERT INTO callbacks (phone, reason, attempt_count, retry_at, status) VALUES (?, ?, ?, ?, 'pending')"
-    ).bind(phone, reason, attemptCount, retryAt).run();
-  } catch (e) {
-    log.error("D1 schedule callback error", { error: e.message });
-  }
+  const exec = async () => {
+    try {
+      await env.DB.prepare(
+        "INSERT INTO callbacks (phone, reason, attempt_count, retry_at, status) VALUES (?, ?, ?, ?, 'pending')"
+      ).bind(phone, reason, attemptCount, retryAt).run();
+    } catch (e) {
+      log.error("D1 schedule callback error", { error: e.message });
+    }
+  };
+  return tracker ? tracker.measureAsync("callbackSchedulingMs", exec) : exec();
 }
 
 async function processDueCallbacks(env) {
-  if (!env.DB || !env.TWILIO_FROM_NUMBER || !env.WORKER_ORIGIN) {
-    log.warn("processDueCallbacks skipped: missing DB, TWILIO_FROM_NUMBER, or WORKER_ORIGIN binding/var");
-    return;
-  }
+  if (!env.DB || !env.TWILIO_FROM_NUMBER || !env.WORKER_ORIGIN) return;
   const due = await env.DB.prepare(
     "SELECT * FROM callbacks WHERE status = 'pending' AND retry_at <= CURRENT_TIMESTAMP LIMIT 20"
   ).all();
@@ -1033,7 +949,7 @@ async function processDueCallbacks(env) {
   }
 }
 
-async function syncCRMAndWhatsApp(env, conversation, callSid) {
+async function syncCRMAndWhatsApp(env, conversation, callSid, tracker) {
   try {
     const customer = conversation.customer;
     let customerId = null;
@@ -1046,7 +962,7 @@ async function syncCRMAndWhatsApp(env, conversation, callSid) {
       }
     }
 
-    const scoring = calculateLeadScoreAndTier(conversation);
+    const scoring = tracker ? tracker.measure("leadScoringMs", () => calculateLeadScoreAndTier(conversation)) : calculateLeadScoreAndTier(conversation);
 
     if (env.DB && customerId) {
       try {
@@ -1093,10 +1009,10 @@ async function syncCRMAndWhatsApp(env, conversation, callSid) {
       appointmentBooked: conversation.appointmentBooked ? "yes" : "no",
     };
 
-    await pushToSheets(env, leadData);
+    await pushToSheets(env, leadData, tracker);
 
     if (!conversation.whatsappSent) {
-      await triggerWhatsAppByIntent(env, customer.phone, conversation.intent, conversation.quote);
+      await triggerWhatsAppByIntent(env, customer.phone, conversation.intent, conversation.quote, tracker);
       conversation.whatsappSent = true;
       if (env.DB) {
         await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
@@ -1107,18 +1023,14 @@ async function syncCRMAndWhatsApp(env, conversation, callSid) {
   }
 }
 
-// =============================================================================
-// SECTION 12 — SHARED TURN PROCESSOR
-// =============================================================================
-
-async function processTurn(env, conversation, rawSpeech, callSid, callRow) {
+async function processTurn(env, conversation, rawSpeech, callSid, callRow, tracker) {
   const speechResult = sanitizeSpeech(rawSpeech);
   conversation.history.push({ role: "customer", text: speechResult });
   conversation.turnCount = (conversation.turnCount || 0) + 1;
 
   if (env.DB) {
     try {
-      await dbLogConversationTurn(env.DB, callSid, "customer", speechResult, conversation.stage);
+      await dbLogConversationTurn(env.DB, callSid, "customer", speechResult, conversation.stage, tracker);
     } catch (e) {
       log.error("D1 log customer turn error", { error: e.message });
     }
@@ -1136,7 +1048,7 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow) {
     if (env.DB) {
       try {
         await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), callSid).run();
-        await dbLogConversationTurn(env.DB, callSid, "asha", replyText, STAGES.HUMAN_TRANSFER);
+        await dbLogConversationTurn(env.DB, callSid, "asha", replyText, STAGES.HUMAN_TRANSFER, tracker);
       } catch (e) {
         log.error("D1 transfer save error", { error: e.message });
       }
@@ -1145,7 +1057,7 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow) {
     return { conversation, replyText, isEnding: true, wantsHuman: true, aiResult: null };
   }
 
-  const aiResult = await getTurnResponse(env, conversation, speechResult);
+  const aiResult = await getTurnResponse(env, conversation, speechResult, tracker);
 
   for (const [key, value] of Object.entries(aiResult.extractedFields || {})) {
     if (value !== null && value !== undefined && value !== "") {
@@ -1155,12 +1067,16 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow) {
   conversation.missingFields = getMissingFields(conversation.customer);
 
   if (conversation.customer.age && conversation.customer.family_members && !conversation.quote) {
-    conversation.quote = recommendPlan(conversation.customer);
+    conversation.quote = tracker
+      ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
+      : recommendPlan(conversation.customer);
     if (env.DB && callRow && callRow.customer_id) {
       try {
-        await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
-          .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
-          .run();
+        await tracker.measureAsync("dbWritesMs", async () => {
+          await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
+            .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
+            .run();
+        });
       } catch (e) {
         log.error("D1 quote save error", { error: e.message });
       }
@@ -1171,20 +1087,21 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow) {
   if (aiResult.callSummary) conversation.summary = aiResult.callSummary;
   if (aiResult.objectionType) conversation.objectionCount = (conversation.objectionCount || 0) + 1;
 
-  // JS state machine controls stage transition
-  conversation.stage = computeNextStage(conversation, aiResult, speechResult);
+  conversation.stage = tracker
+    ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, aiResult, speechResult))
+    : computeNextStage(conversation, aiResult, speechResult);
 
   const appointmentDatetime = aiResult.extractedFields && aiResult.extractedFields.appointment_datetime;
   if (appointmentDatetime && !conversation.appointmentBooked) {
     conversation.appointmentBooked = true;
     if (env.DB) {
-      await dbSaveAppointment(env, callRow && callRow.customer_id, conversation.customer.phone, appointmentDatetime, conversation.summary);
+      await dbSaveAppointment(env, callRow && callRow.customer_id, conversation.customer.phone, appointmentDatetime, conversation.summary, tracker);
     }
   }
 
   if (env.DB) {
     try {
-      await dbUpdateCustomer(env.DB, conversation.customer.phone, conversation.customer);
+      await dbUpdateCustomer(env.DB, conversation.customer.phone, conversation.customer, tracker);
     } catch (e) {
       log.error("D1 customer update error", { error: e.message });
     }
@@ -1196,8 +1113,10 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow) {
 
   if (env.DB) {
     try {
-      await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), callSid).run();
-      await dbLogConversationTurn(env.DB, callSid, "asha", replyText, conversation.stage);
+      await tracker.measureAsync("dbWritesMs", async () => {
+        await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), callSid).run();
+        await dbLogConversationTurn(env.DB, callSid, "asha", replyText, conversation.stage);
+      });
     } catch (e) {
       log.error("D1 log reply turn error", { error: e.message });
     }
@@ -1247,10 +1166,6 @@ function buildGreeting(direction) {
     : "Thank you for calling TATA AIG Health Insurance. My name is Asha. How can I help you today?";
 }
 
-// =============================================================================
-// SECTION 13 — ENDPOINT ROUTING
-// =============================================================================
-
 async function handleDashboard(request, env) {
   let calls = [];
   let stats = {
@@ -1267,10 +1182,8 @@ async function handleDashboard(request, env) {
 
   if (env.DB) {
     try {
-      const callsResult = await env.DB.prepare("SELECT * FROM voice_calls ORDER BY started_at DESC LIMIT 50").all();
-      calls = callsResult.results || [];
-
-      const [totalCallsQuery, answeredQuery, missedQuery, avgDurationQuery, hotQuery, warmQuery, appointmentsQuery, quotesQuery, transfersQueryLogs] = await Promise.all([
+      const [callsResult, totalCallsQuery, answeredQuery, missedQuery, avgDurationQuery, hotQuery, warmQuery, appointmentsQuery, quotesQuery, transfersQueryLogs] = await Promise.all([
+        env.DB.prepare("SELECT * FROM voice_calls ORDER BY started_at DESC LIMIT 50").all(),
         env.DB.prepare("SELECT COUNT(*) as count FROM voice_calls").first(),
         env.DB.prepare("SELECT COUNT(*) as count FROM voice_calls WHERE status = 'completed' AND call_duration > 0").first(),
         env.DB.prepare("SELECT COUNT(*) as count FROM voice_calls WHERE status IN ('failed', 'no-answer', 'busy')").first(),
@@ -1282,6 +1195,7 @@ async function handleDashboard(request, env) {
         env.DB.prepare("SELECT COUNT(DISTINCT call_sid) as count FROM conversation_logs WHERE stage = 'human_transfer'").first(),
       ]);
 
+      calls = callsResult.results || [];
       stats.totalCalls = totalCallsQuery?.count || 0;
       stats.answeredCalls = answeredQuery?.count || 0;
       stats.missedCalls = missedQuery?.count || 0;
@@ -1319,16 +1233,14 @@ async function handleTestCall(request, env) {
   }
 }
 
-const routeCallIncoming = requireTwilioSignature(async (form, request, env, ctx) => {
+const routeCallIncoming = requireTwilioSignature(async (form, request, env, ctx, tracker) => {
   const callSid = form.get("CallSid") || "";
   const fromNum = form.get("From") || "";
   const toNum = form.get("To") || "";
   const twilioDirection = form.get("Direction") || "";
   const origin = new URL(request.url).origin;
 
-  if (!callSid || !fromNum) {
-    return new Response("Bad Request", { status: 400 });
-  }
+  if (!callSid || !fromNum) return new Response("Bad Request", { status: 400 });
 
   let direction = CALL_DIRECTION.INBOUND;
   if (twilioDirection.includes("outbound") || fromNum === env.TWILIO_FROM_NUMBER) {
@@ -1338,7 +1250,7 @@ const routeCallIncoming = requireTwilioSignature(async (form, request, env, ctx)
   let customer = { phone: fromNum };
   if (env.DB) {
     try {
-      customer = await dbGetOrCreateCustomer(env.DB, fromNum);
+      customer = await dbGetOrCreateCustomer(env.DB, fromNum, tracker);
     } catch (e) {
       log.error("D1 customer load error", { error: e.message });
     }
@@ -1348,9 +1260,11 @@ const routeCallIncoming = requireTwilioSignature(async (form, request, env, ctx)
 
   if (env.DB) {
     try {
-      await env.DB.prepare(
-        "INSERT OR REPLACE INTO voice_calls (call_sid, phone, customer_id, status, stage, profiling_index, session_data) VALUES (?, ?, ?, 'in_progress', ?, 0, ?)"
-      ).bind(callSid, fromNum, customer.id || null, conversation.stage, JSON.stringify(conversation)).run();
+      await tracker.measureAsync("dbWritesMs", async () => {
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO voice_calls (call_sid, phone, customer_id, status, stage, profiling_index, session_data) VALUES (?, ?, ?, 'in_progress', ?, 0, ?)"
+        ).bind(callSid, fromNum, customer.id || null, conversation.stage, JSON.stringify(conversation)).run();
+      });
     } catch (e) {
       log.error("D1 call insert error", { error: e.message });
     }
@@ -1367,8 +1281,10 @@ const routeCallIncoming = requireTwilioSignature(async (form, request, env, ctx)
 
   if (env.DB) {
     try {
-      await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
-      await dbLogConversationTurn(env.DB, callSid, "asha", greeting, conversation.stage);
+      await tracker.measureAsync("dbWritesMs", async () => {
+        await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
+        await dbLogConversationTurn(env.DB, callSid, "asha", greeting, conversation.stage);
+      });
     } catch (e) {
       log.error("D1 update call error", { error: e.message });
     }
@@ -1377,7 +1293,7 @@ const routeCallIncoming = requireTwilioSignature(async (form, request, env, ctx)
   return sayAndGather({ text: greeting, actionUrl: `${origin}/voice/gather`, language: env.GATHER_LANGUAGE || CONFIG.GATHER_LANGUAGE });
 });
 
-const routeCallGather = requireTwilioSignature(async (form, request, env, ctx) => {
+const routeCallGather = requireTwilioSignature(async (form, request, env, ctx, tracker) => {
   const callSid = form.get("CallSid") || "";
   const speechResult = (form.get("SpeechResult") || "").trim();
   const digitsResult = (form.get("Digits") || "").trim();
@@ -1396,7 +1312,9 @@ const routeCallGather = requireTwilioSignature(async (form, request, env, ctx) =
   let callRow = null;
   if (env.DB) {
     try {
-      callRow = await env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(callSid).first();
+      callRow = await tracker.measureAsync("sessionLookupMs", async () => {
+        return env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(callSid).first();
+      });
     } catch (e) {
       log.error("D1 select call error", { error: e.message });
     }
@@ -1407,7 +1325,7 @@ const routeCallGather = requireTwilioSignature(async (form, request, env, ctx) =
   }
 
   const conversation = JSON.parse(callRow.session_data || "{}");
-  const { replyText, isEnding, wantsHuman } = await processTurn(env, conversation, inputResult, callSid, callRow);
+  const { replyText, isEnding, wantsHuman } = await processTurn(env, conversation, inputResult, callSid, callRow, tracker);
 
   if (wantsHuman) {
     ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, callSid));
@@ -1422,7 +1340,7 @@ const routeCallGather = requireTwilioSignature(async (form, request, env, ctx) =
   return sayAndGather({ text: replyText, actionUrl: `${origin}/voice/gather`, language: env.GATHER_LANGUAGE || CONFIG.GATHER_LANGUAGE });
 });
 
-const handleCallStatus = requireTwilioSignature(async (form, request, env, ctx) => {
+const handleCallStatus = requireTwilioSignature(async (form, request, env, ctx, tracker) => {
   const callSid = form.get("CallSid") || "";
   const duration = parseInt(form.get("CallDuration") || "0", 10);
   const callStatus = form.get("CallStatus") || "";
@@ -1430,18 +1348,25 @@ const handleCallStatus = requireTwilioSignature(async (form, request, env, ctx) 
 
   if (env.DB) {
     try {
-      await env.DB.prepare("UPDATE voice_calls SET status = ?, call_duration = ?, ended_at = CURRENT_TIMESTAMP WHERE call_sid = ?").bind(callStatus, duration, callSid).run();
+      await tracker.measureAsync("dbWritesMs", async () => {
+        await env.DB.prepare("UPDATE voice_calls SET status = ?, call_duration = ?, ended_at = CURRENT_TIMESTAMP WHERE call_sid = ?").bind(callStatus, duration, callSid).run();
+      });
 
-      const callRow = await env.DB.prepare("SELECT session_data, phone FROM voice_calls WHERE call_sid = ?").bind(callSid).first();
+      const callRow = await tracker.measureAsync("sessionLookupMs", async () => {
+        return env.DB.prepare("SELECT session_data, phone FROM voice_calls WHERE call_sid = ?").bind(callSid).first();
+      });
+
       if (callRow?.session_data) {
         const conversation = JSON.parse(callRow.session_data);
         conversation.recordingUrl = recordingUrl;
         conversation.callDuration = duration;
 
-        await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
+        await tracker.measureAsync("dbWritesMs", async () => {
+          await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
+        });
 
         if (conversation.direction === CALL_DIRECTION.OUTBOUND && (callStatus === "no-answer" || callStatus === "busy")) {
-          ctx.waitUntil(dbScheduleCallback(env, callRow.phone, callStatus, 1));
+          ctx.waitUntil(dbScheduleCallback(env, callRow.phone, callStatus, 1, tracker));
         } else {
           ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, callSid));
         }
@@ -1468,9 +1393,8 @@ const handleCallFallback = requireTwilioSignature(async (form, request, env, ctx
   });
 });
 
-async function handleEnhancedHealth(request, env) {
+async function handleEnhancedHealth(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
-  const t0 = Date.now();
   const result = {
     worker: "ok",
     version: "3.0.0",
@@ -1482,7 +1406,7 @@ async function handleEnhancedHealth(request, env) {
   };
   if (env.DB) {
     try {
-      await env.DB.prepare("SELECT 1").first();
+      await tracker.measureAsync("dbReadsMs", async () => env.DB.prepare("SELECT 1").first());
       result.services.db = "ok";
     } catch {
       result.services.db = "error";
@@ -1495,19 +1419,24 @@ async function handleEnhancedHealth(request, env) {
   if (env.TWILIO_ACCOUNT_SID) result.services.twilio = "configured";
   if (env.WHATSAPP_TOKEN) result.services.whatsapp = "configured";
   result.services.twilioSignatureValidation = env.SKIP_TWILIO_VALIDATION === "true" ? "disabled" : "enabled";
-  result.latencyMs = Date.now() - t0;
-  return jsonResponse(result, 200, reqOrigin);
+
+  const metrics = tracker.finish();
+  result.latencyMs = metrics.totalRequestMs;
+  result.timings = metrics;
+  return jsonResponse(result, 200, reqOrigin, tracker);
 }
 
-async function handleApiStatus(request, env) {
+async function handleApiStatus(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   let activeSessions = 0, totalCustomers = 0, dbStatus = "unknown";
   if (env.DB) {
     try {
-      const [sess, cust] = await Promise.all([
-        env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls WHERE status = 'in_progress'").first(),
-        env.DB.prepare("SELECT COUNT(*) as c FROM customers").first(),
-      ]);
+      const [sess, cust] = await tracker.measureAsync("dbReadsMs", async () => {
+        return Promise.all([
+          env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls WHERE status = 'in_progress'").first(),
+          env.DB.prepare("SELECT COUNT(*) as c FROM customers").first(),
+        ]);
+      });
       activeSessions = sess?.c || 0;
       totalCustomers = cust?.c || 0;
       dbStatus = "ok";
@@ -1515,6 +1444,7 @@ async function handleApiStatus(request, env) {
       dbStatus = "error";
     }
   }
+  const metrics = tracker.finish();
   return jsonResponse(
     {
       status: "ok",
@@ -1525,13 +1455,15 @@ async function handleApiStatus(request, env) {
       openai: env.OPENAI_API_KEY ? "configured" : "not_set",
       whatsapp: env.WHATSAPP_TOKEN ? "configured" : "not_set",
       twilio: env.TWILIO_ACCOUNT_SID ? "configured" : "not_set",
+      timings: metrics,
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-function handleApiConfig(request, env) {
+function handleApiConfig(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   return jsonResponse(
     {
@@ -1546,18 +1478,23 @@ function handleApiConfig(request, env) {
       maxTurns: CONFIG.MAX_TURNS,
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-async function handleApiSessionGet(request, env) {
+async function handleApiSessionGet(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const url = new URL(request.url);
   const sessionId = url.pathname.split("/").pop();
-  if (!sessionId) return jsonResponse({ error: "Missing session ID" }, 400, reqOrigin);
-  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin);
-  const row = await env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
-  if (!row) return jsonResponse({ error: "Session not found" }, 404, reqOrigin);
+  if (!sessionId) return jsonResponse({ error: "Missing session ID" }, 400, reqOrigin, tracker);
+  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin, tracker);
+
+  const row = await tracker.measureAsync("sessionLookupMs", async () => {
+    return env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+  });
+  if (!row) return jsonResponse({ error: "Session not found" }, 404, reqOrigin, tracker);
+
   let sessionData = {};
   try {
     sessionData = JSON.parse(row.session_data || "{}");
@@ -1581,50 +1518,62 @@ async function handleApiSessionGet(request, env) {
       appointmentBooked: sessionData.appointmentBooked || false,
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-async function handleApiSessionEnd(request, env) {
+async function handleApiSessionEnd(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   let body = {};
   try {
-    body = await request.json();
+    body = await tracker.measureAsync("requestParsingMs", () => request.json());
   } catch {}
   const { sessionId } = body;
-  if (!sessionId) return jsonResponse({ error: "sessionId required" }, 400, reqOrigin);
+  if (!sessionId) return jsonResponse({ error: "sessionId required" }, 400, reqOrigin, tracker);
   if (env.DB) {
     try {
-      const row = await env.DB.prepare("SELECT session_data FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      const row = await tracker.measureAsync("sessionLookupMs", async () => {
+        return env.DB.prepare("SELECT session_data FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      });
       if (row) {
         let session = {};
         try {
           session = JSON.parse(row.session_data || "{}");
         } catch {}
         session.stage = STAGES.ENDED;
-        await env.DB.prepare("UPDATE voice_calls SET status = 'completed', stage = ?, ended_at = CURRENT_TIMESTAMP, session_data = ? WHERE call_sid = ?").bind(STAGES.ENDED, JSON.stringify(session), sessionId).run();
+        await tracker.measureAsync("dbWritesMs", async () => {
+          await env.DB.prepare("UPDATE voice_calls SET status = 'completed', stage = ?, ended_at = CURRENT_TIMESTAMP, session_data = ? WHERE call_sid = ?").bind(STAGES.ENDED, JSON.stringify(session), sessionId).run();
+        });
       }
     } catch (e) {
       log.error("Session end error", { error: e.message });
     }
   }
-  return jsonResponse({ ok: true, sessionId, stage: STAGES.ENDED }, 200, reqOrigin);
+  return jsonResponse({ ok: true, sessionId, stage: STAGES.ENDED }, 200, reqOrigin, tracker);
 }
 
-async function handleApiCustomerGet(request, env) {
+async function handleApiCustomerGet(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const url = new URL(request.url);
   const phone = decodeURIComponent(url.pathname.split("/").pop());
-  if (!phone) return jsonResponse({ error: "Missing phone" }, 400, reqOrigin);
-  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin);
-  const customer = await env.DB.prepare("SELECT * FROM customers WHERE phone = ?").bind(phone).first();
-  if (!customer) return jsonResponse({ error: "Customer not found" }, 404, reqOrigin);
-  const [calls, quotes, leadScore, appointments] = await Promise.all([
-    env.DB.prepare("SELECT call_sid, status, stage, call_duration, started_at FROM voice_calls WHERE phone = ? ORDER BY started_at DESC LIMIT 10").bind(phone).all(),
-    env.DB.prepare("SELECT * FROM insurance_quotes WHERE customer_id = ? ORDER BY created_at DESC LIMIT 5").bind(customer.id).all(),
-    env.DB.prepare("SELECT score, tier, reasons FROM lead_scores WHERE customer_id = ?").bind(customer.id).first(),
-    env.DB.prepare("SELECT * FROM appointments WHERE customer_id = ? ORDER BY created_at DESC LIMIT 5").bind(customer.id).all(),
-  ]);
+  if (!phone) return jsonResponse({ error: "Missing phone" }, 400, reqOrigin, tracker);
+  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin, tracker);
+
+  const customer = await tracker.measureAsync("customerLookupMs", async () => {
+    return env.DB.prepare("SELECT * FROM customers WHERE phone = ?").bind(phone).first();
+  });
+  if (!customer) return jsonResponse({ error: "Customer not found" }, 404, reqOrigin, tracker);
+
+  const [calls, quotes, leadScore, appointments] = await tracker.measureAsync("dbReadsMs", async () => {
+    return Promise.all([
+      env.DB.prepare("SELECT call_sid, status, stage, call_duration, started_at FROM voice_calls WHERE phone = ? ORDER BY started_at DESC LIMIT 10").bind(phone).all(),
+      env.DB.prepare("SELECT * FROM insurance_quotes WHERE customer_id = ? ORDER BY created_at DESC LIMIT 5").bind(customer.id).all(),
+      env.DB.prepare("SELECT score, tier, reasons FROM lead_scores WHERE customer_id = ?").bind(customer.id).first(),
+      env.DB.prepare("SELECT * FROM appointments WHERE customer_id = ? ORDER BY created_at DESC LIMIT 5").bind(customer.id).all(),
+    ]);
+  });
+
   return jsonResponse(
     {
       customer,
@@ -1634,36 +1583,44 @@ async function handleApiCustomerGet(request, env) {
       appointments: appointments.results || [],
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-async function handleApiHistory(request, env) {
+async function handleApiHistory(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const url = new URL(request.url);
   const sessionId = url.pathname.split("/").pop();
-  if (!sessionId) return jsonResponse({ error: "sessionId required" }, 400, reqOrigin);
-  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin);
-  const logs = await env.DB.prepare("SELECT speaker, message, stage, created_at FROM conversation_logs WHERE call_sid = ? ORDER BY created_at ASC").bind(sessionId).all();
-  return jsonResponse({ sessionId, turns: logs.results || [] }, 200, reqOrigin);
+  if (!sessionId) return jsonResponse({ error: "sessionId required" }, 400, reqOrigin, tracker);
+  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin, tracker);
+
+  const logs = await tracker.measureAsync("historyLookupMs", async () => {
+    return env.DB.prepare("SELECT speaker, message, stage, created_at FROM conversation_logs WHERE call_sid = ? ORDER BY created_at ASC").bind(sessionId).all();
+  });
+  return jsonResponse({ sessionId, turns: logs.results || [] }, 200, reqOrigin, tracker);
 }
 
-async function handleApiAnalytics(request, env) {
+async function handleApiAnalytics(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
-  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin);
-  const [total, completed, failed, hot, warm, cold, avgDur, quotes, appointments, transfers, stageDist] = await Promise.all([
-    env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls").first(),
-    env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls WHERE status = 'completed'").first(),
-    env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls WHERE status IN ('failed','no-answer','busy')").first(),
-    env.DB.prepare("SELECT AVG(call_duration) as a FROM voice_calls WHERE call_duration > 0").first(),
-    env.DB.prepare("SELECT COUNT(*) as c FROM lead_scores WHERE tier = 'hot'").first(),
-    env.DB.prepare("SELECT COUNT(*) as c FROM lead_scores WHERE tier = 'warm'").first(),
-    env.DB.prepare("SELECT COUNT(*) as c FROM lead_scores WHERE tier = 'cold'").first(),
-    env.DB.prepare("SELECT COUNT(*) as c FROM insurance_quotes").first(),
-    env.DB.prepare("SELECT COUNT(*) as c FROM appointments").first(),
-    env.DB.prepare("SELECT COUNT(DISTINCT call_sid) as c FROM conversation_logs WHERE stage = 'human_transfer'").first(),
-    env.DB.prepare("SELECT stage, COUNT(*) as count FROM voice_calls GROUP BY stage ORDER BY count DESC").all(),
-  ]);
+  if (!env.DB) return jsonResponse({ error: "DB not available" }, 503, reqOrigin, tracker);
+
+  const [total, completed, failed, avgDur, hot, warm, cold, quotes, appointments, transfers, stageDist] = await tracker.measureAsync("dbReadsMs", async () => {
+    return Promise.all([
+      env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls").first(),
+      env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls WHERE status = 'completed'").first(),
+      env.DB.prepare("SELECT COUNT(*) as c FROM voice_calls WHERE status IN ('failed','no-answer','busy')").first(),
+      env.DB.prepare("SELECT AVG(call_duration) as a FROM voice_calls WHERE call_duration > 0").first(),
+      env.DB.prepare("SELECT COUNT(*) as c FROM lead_scores WHERE tier = 'hot'").first(),
+      env.DB.prepare("SELECT COUNT(*) as c FROM lead_scores WHERE tier = 'warm'").first(),
+      env.DB.prepare("SELECT COUNT(*) as c FROM lead_scores WHERE tier = 'cold'").first(),
+      env.DB.prepare("SELECT COUNT(*) as c FROM insurance_quotes").first(),
+      env.DB.prepare("SELECT COUNT(*) as c FROM appointments").first(),
+      env.DB.prepare("SELECT COUNT(DISTINCT call_sid) as c FROM conversation_logs WHERE stage = 'human_transfer'").first(),
+      env.DB.prepare("SELECT stage, COUNT(*) as count FROM voice_calls GROUP BY stage ORDER BY count DESC").all(),
+    ]);
+  });
+
   return jsonResponse(
     {
       totalCalls: total?.c || 0,
@@ -1677,47 +1634,52 @@ async function handleApiAnalytics(request, env) {
       stageDistribution: stageDist.results || [],
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-async function handleApiFeedback(request, env) {
+async function handleApiFeedback(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   let body = {};
   try {
-    body = await request.json();
+    body = await tracker.measureAsync("requestParsingMs", () => request.json());
   } catch {}
   const { sessionId, rating, comment } = body;
-  if (!sessionId || rating === undefined) return jsonResponse({ error: "sessionId and rating are required" }, 400, reqOrigin);
-  if (rating < 1 || rating > 5) return jsonResponse({ error: "rating must be 1-5" }, 400, reqOrigin);
+  if (!sessionId || rating === undefined) return jsonResponse({ error: "sessionId and rating are required" }, 400, reqOrigin, tracker);
+  if (rating < 1 || rating > 5) return jsonResponse({ error: "rating must be 1-5" }, 400, reqOrigin, tracker);
   if (env.DB) {
     try {
-      const row = await env.DB.prepare("SELECT session_data FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      const row = await tracker.measureAsync("sessionLookupMs", async () => {
+        return env.DB.prepare("SELECT session_data FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      });
       if (row) {
         let session = {};
         try {
           session = JSON.parse(row.session_data || "{}");
         } catch {}
         session.feedback = { rating, comment: comment || "", submittedAt: new Date().toISOString() };
-        await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(session), sessionId).run();
+        await tracker.measureAsync("dbWritesMs", async () => {
+          await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(session), sessionId).run();
+        });
       }
     } catch (e) {
       log.error("Feedback save error", { error: e.message });
     }
   }
-  return jsonResponse({ ok: true, sessionId, rating }, 200, reqOrigin);
+  return jsonResponse({ ok: true, sessionId, rating }, 200, reqOrigin, tracker);
 }
 
-function requireDevEnvironment(env, reqOrigin) {
+function requireDevEnvironment(env, reqOrigin, tracker) {
   if ((env.ENVIRONMENT || "production") !== "development") {
-    return jsonResponse({ error: "Available in development only" }, 403, reqOrigin);
+    return jsonResponse({ error: "Available in development only" }, 403, reqOrigin, tracker);
   }
   return null;
 }
 
-function handleDebugRoutes(request, env) {
+function handleDebugRoutes(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
-  const denied = requireDevEnvironment(env, reqOrigin);
+  const denied = requireDevEnvironment(env, reqOrigin, tracker);
   if (denied) return denied;
   return jsonResponse(
     {
@@ -1746,13 +1708,14 @@ function handleDebugRoutes(request, env) {
       ],
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-function handleDebugEnv(request, env) {
+function handleDebugEnv(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
-  const denied = requireDevEnvironment(env, reqOrigin);
+  const denied = requireDevEnvironment(env, reqOrigin, tracker);
   if (denied) return denied;
   return jsonResponse(
     {
@@ -1770,7 +1733,8 @@ function handleDebugEnv(request, env) {
       twilioSignatureValidation: env.SKIP_TWILIO_VALIDATION === "true" ? "disabled" : "enabled",
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
@@ -1783,20 +1747,24 @@ function corsHeaders(origin) {
   };
 }
 
-function jsonResponse(data, status = 200, reqOrigin) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json", ...corsHeaders(reqOrigin) },
-  });
+function jsonResponse(data, status = 200, reqOrigin, tracker) {
+  const headers = { "Content-Type": "application/json", ...corsHeaders(reqOrigin) };
+  if (tracker) {
+    const metrics = tracker.finish();
+    headers["X-Response-Time-Ms"] = String(metrics.totalRequestMs);
+    headers["X-Request-Id"] = metrics.reqId;
+    if (typeof data === "object" && data !== null) {
+      data.timings = metrics;
+    }
+  }
+  return new Response(JSON.stringify(data), { status, headers });
 }
 
-// ---- Browser test API ----
-
-async function handleBrowserSession(request, env) {
+async function handleBrowserSession(request, env, ctx, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   let body = {};
   try {
-    body = await request.json();
+    body = await tracker.measureAsync("requestParsingMs", () => request.json());
   } catch {}
 
   const direction = body.direction || CALL_DIRECTION.OUTBOUND;
@@ -1806,7 +1774,7 @@ async function handleBrowserSession(request, env) {
   let customer = { phone };
   if (env.DB) {
     try {
-      customer = await dbGetOrCreateCustomer(env.DB, phone);
+      customer = await dbGetOrCreateCustomer(env.DB, phone, tracker);
     } catch {}
   }
 
@@ -1818,10 +1786,12 @@ async function handleBrowserSession(request, env) {
 
   if (env.DB) {
     try {
-      await env.DB.prepare(
-        "INSERT OR REPLACE INTO voice_calls (call_sid, phone, customer_id, status, stage, profiling_index, session_data) VALUES (?, ?, ?, 'in_progress', ?, 0, ?)"
-      ).bind(sessionId, phone, customer.id || null, conversation.stage, JSON.stringify(conversation)).run();
-      await dbLogConversationTurn(env.DB, sessionId, "asha", greeting, conversation.stage);
+      await tracker.measureAsync("dbWritesMs", async () => {
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO voice_calls (call_sid, phone, customer_id, status, stage, profiling_index, session_data) VALUES (?, ?, ?, 'in_progress', ?, 0, ?)"
+        ).bind(sessionId, phone, customer.id || null, conversation.stage, JSON.stringify(conversation)).run();
+        await dbLogConversationTurn(env.DB, sessionId, "asha", greeting, conversation.stage, tracker);
+      });
     } catch {}
   }
 
@@ -1836,36 +1806,41 @@ async function handleBrowserSession(request, env) {
       model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-async function handleBrowserTurn(request, env) {
+async function handleBrowserTurn(request, env, ctx, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   let body = {};
   try {
-    body = await request.json();
+    body = await tracker.measureAsync("requestParsingMs", () => request.json());
   } catch {}
 
   const { sessionId, speechResult } = body;
-  if (!sessionId || !speechResult) return jsonResponse({ error: "Missing sessionId or speechResult" }, 400, reqOrigin);
+  if (!sessionId || !speechResult) return jsonResponse({ error: "Missing sessionId or speechResult" }, 400, reqOrigin, tracker);
 
   let callRow = null;
   if (env.DB) {
     try {
-      callRow = await env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      callRow = await tracker.measureAsync("sessionLookupMs", async () => {
+        return env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      });
     } catch {}
   }
-  if (!callRow) return jsonResponse({ error: "Session not found" }, 404, reqOrigin);
+  if (!callRow) return jsonResponse({ error: "Session not found" }, 404, reqOrigin, tracker);
 
   const conversation = JSON.parse(callRow.session_data || "{}");
-  const t0 = Date.now();
 
-  const { replyText, isEnding, wantsHuman, aiResult } = await processTurn(env, conversation, speechResult, sessionId, callRow);
+  const { replyText, isEnding, wantsHuman, aiResult } = await processTurn(env, conversation, speechResult, sessionId, callRow, tracker);
 
   if (isEnding || wantsHuman) {
-    await syncCRMAndWhatsApp(env, conversation, sessionId);
+    ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, sessionId, tracker));
   }
+
+  const metrics = tracker.finish();
+  log.info("Request Performance Summary", metrics);
 
   return jsonResponse(
     {
@@ -1882,20 +1857,22 @@ async function handleBrowserTurn(request, env) {
       quote: conversation.quote,
       summary: conversation.summary,
       turnCount: conversation.turnCount,
-      latencyMs: Date.now() - t0,
+      latencyMs: metrics.totalRequestMs,
       model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
+      timings: metrics,
     },
     200,
-    reqOrigin
+    reqOrigin,
+    tracker
   );
 }
 
-async function handleApiDb(request, env) {
+async function handleApiDb(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const url = new URL(request.url);
   const table = url.pathname.split("/").pop();
   const allowed = ["customers", "voice_calls", "conversation_logs", "insurance_quotes", "lead_scores", "appointments", "callbacks"];
-  if (!allowed.includes(table)) return jsonResponse({ error: "Table not allowed" }, 403, reqOrigin);
+  if (!allowed.includes(table)) return jsonResponse({ error: "Table not allowed" }, 403, reqOrigin, tracker);
 
   const page = parseInt(url.searchParams.get("page") || "1", 10);
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 200);
@@ -1905,21 +1882,21 @@ async function handleApiDb(request, env) {
   let total = 0;
   if (env.DB) {
     try {
-      const countRes = await env.DB.prepare(`SELECT COUNT(*) as c FROM ${table}`).first();
+      const [countRes, result] = await tracker.measureAsync("dbReadsMs", async () => {
+        return Promise.all([
+          env.DB.prepare(`SELECT COUNT(*) as c FROM ${table}`).first(),
+          env.DB.prepare(`SELECT * FROM ${table} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(limit, offset).all(),
+        ]);
+      });
       total = countRes?.c || 0;
-      const result = await env.DB.prepare(`SELECT * FROM ${table} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(limit, offset).all();
       rows = result.results || [];
       if (search) rows = rows.filter((r) => JSON.stringify(r).toLowerCase().includes(search.toLowerCase()));
     } catch (e) {
-      return jsonResponse({ error: e.message }, 500, reqOrigin);
+      return jsonResponse({ error: e.message }, 500, reqOrigin, tracker);
     }
   }
-  return jsonResponse({ rows, total, page, limit }, 200, reqOrigin);
+  return jsonResponse({ rows, total, page, limit }, 200, reqOrigin, tracker);
 }
-
-// =============================================================================
-// SECTION 14 — DASHBOARD HTML
-// =============================================================================
 
 function getDashboardHtml(stats, calls) {
   return `
@@ -2046,12 +2023,9 @@ function getDashboardHtml(stats, calls) {
   `;
 }
 
-// =============================================================================
-// SECTION 15 — WORKER ENTRYPOINT
-// =============================================================================
-
 export default {
   async fetch(request, env, ctx) {
+    const tracker = new PerformanceTracker();
     const url = new URL(request.url);
     const method = request.method;
     const reqOrigin = request.headers.get("Origin") || "*";
@@ -2063,34 +2037,34 @@ export default {
     try {
       if (url.pathname === "/") return await handleDashboard(request, env);
       if (url.pathname === "/health") {
-        return jsonResponse({ status: "ok", agent: env.AGENT_NAME || CONFIG.AGENT_NAME, model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL }, 200, reqOrigin);
+        return jsonResponse({ status: "ok", agent: env.AGENT_NAME || CONFIG.AGENT_NAME, model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL }, 200, reqOrigin, tracker);
       }
       if (url.pathname === "/test-call" && method === "POST") return await handleTestCall(request, env);
 
-      if (url.pathname === "/voice/incoming" && method === "POST") return await routeCallIncoming(request, env, ctx);
-      if (url.pathname === "/voice/gather" && method === "POST") return await routeCallGather(request, env, ctx);
-      if (url.pathname === "/voice/status" && method === "POST") return await handleCallStatus(request, env, ctx);
-      if (url.pathname === "/voice/fallback" && method === "POST") return await handleCallFallback(request, env, ctx);
+      if (url.pathname === "/voice/incoming" && method === "POST") return await routeCallIncoming(request, env, ctx, tracker);
+      if (url.pathname === "/voice/gather" && method === "POST") return await routeCallGather(request, env, ctx, tracker);
+      if (url.pathname === "/voice/status" && method === "POST") return await handleCallStatus(request, env, ctx, tracker);
+      if (url.pathname === "/voice/fallback" && method === "POST") return await handleCallFallback(request, env, ctx, tracker);
 
       if (url.pathname === "/whatsapp/webhook") return new Response("OK", { status: 200 });
 
-      if (url.pathname === "/voice/browser-session" && method === "POST") return await handleBrowserSession(request, env);
-      if (url.pathname === "/voice/browser-turn" && method === "POST") return await handleBrowserTurn(request, env);
+      if (url.pathname === "/voice/browser-session" && method === "POST") return await handleBrowserSession(request, env, ctx, tracker);
+      if (url.pathname === "/voice/browser-turn" && method === "POST") return await handleBrowserTurn(request, env, ctx, tracker);
 
-      if (url.pathname.startsWith("/api/db/") && method === "GET") return await handleApiDb(request, env);
-      if (url.pathname === "/api/health" && method === "GET") return await handleEnhancedHealth(request, env);
-      if (url.pathname === "/api/status" && method === "GET") return await handleApiStatus(request, env);
-      if (url.pathname === "/api/config" && method === "GET") return handleApiConfig(request, env);
-      if (url.pathname === "/api/session/end" && method === "POST") return await handleApiSessionEnd(request, env);
-      if (url.pathname.startsWith("/api/session/") && method === "GET") return await handleApiSessionGet(request, env);
-      if (url.pathname.startsWith("/api/customer/") && method === "GET") return await handleApiCustomerGet(request, env);
-      if (url.pathname.startsWith("/api/history/") && method === "GET") return await handleApiHistory(request, env);
-      if (url.pathname === "/api/analytics" && method === "GET") return await handleApiAnalytics(request, env);
-      if (url.pathname === "/api/feedback" && method === "POST") return await handleApiFeedback(request, env);
-      if (url.pathname === "/api/debug/routes" && method === "GET") return handleDebugRoutes(request, env);
-      if (url.pathname === "/api/debug/env" && method === "GET") return handleDebugEnv(request, env);
+      if (url.pathname.startsWith("/api/db/") && method === "GET") return await handleApiDb(request, env, tracker);
+      if (url.pathname === "/api/health" && method === "GET") return await handleEnhancedHealth(request, env, tracker);
+      if (url.pathname === "/api/status" && method === "GET") return await handleApiStatus(request, env, tracker);
+      if (url.pathname === "/api/config" && method === "GET") return handleApiConfig(request, env, tracker);
+      if (url.pathname === "/api/session/end" && method === "POST") return await handleApiSessionEnd(request, env, tracker);
+      if (url.pathname.startsWith("/api/session/") && method === "GET") return await handleApiSessionGet(request, env, tracker);
+      if (url.pathname.startsWith("/api/customer/") && method === "GET") return await handleApiCustomerGet(request, env, tracker);
+      if (url.pathname.startsWith("/api/history/") && method === "GET") return await handleApiHistory(request, env, tracker);
+      if (url.pathname === "/api/analytics" && method === "GET") return await handleApiAnalytics(request, env, tracker);
+      if (url.pathname === "/api/feedback" && method === "POST") return await handleApiFeedback(request, env, tracker);
+      if (url.pathname === "/api/debug/routes" && method === "GET") return handleDebugRoutes(request, env, tracker);
+      if (url.pathname === "/api/debug/env" && method === "GET") return handleDebugEnv(request, env, tracker);
 
-      return jsonResponse({ error: "Not Found", path: url.pathname }, 404, reqOrigin);
+      return jsonResponse({ error: "Not Found", path: url.pathname }, 404, reqOrigin, tracker);
     } catch (err) {
       log.error("Global router error", { error: err.message, stack: err.stack });
       return new Response("Internal Server Error", { status: 500 });
