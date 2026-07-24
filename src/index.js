@@ -2,7 +2,7 @@ const CONFIG = {
   AGENT_NAME: "Asha",
   COMPANY_NAME: "TATA AIG Health Insurance",
   GATHER_LANGUAGE: "en-IN",
-  GEMINI_MODEL: "gemini-3.5-flash",
+  GEMINI_MODEL: "gemini-2.5-flash",
   OPENAI_MODEL: "gpt-4o-mini",
   MAX_TURNS: 20,
   AI_TIMEOUT_MS: 10000,
@@ -971,38 +971,56 @@ function validateResponse(reply) {
 }
 
 function getLocalFallbackResponse(speech, stage) {
-  const lower = (speech || "").toLowerCase();
-  const isHindi = /kya|hai|haan|nahi|mujhe|polic|chahiye|tata|aig|batao|kaise|kitna|karo/i.test(lower);
+  const lower = (speech || "").toLowerCase().trim();
 
-  if (isHindi) {
-    if (lower.includes("hospital") || lower.includes("cashless") || lower.includes("network")) {
-      return "Humare paas 7,000 se zyada cashless hospitals hain, jaise Mumbai mein Lilavati aur Delhi mein Max. Main aapko poori list WhatsApp par bhej deti hoon.";
+  // Affirmative responses ("yes", "haan", "sure", "ok", "speaking")
+  if (/^(yes|yeah|yep|haan|han|sure|ok|okay|speaking|correct|right|sahi|ha|true)$/i.test(lower) || lower.includes("yes") || lower.includes("haan") || lower.includes("speaking")) {
+    if (stage === STAGES.GREETING || stage === STAGES.PERMISSION || stage === STAGES.WELCOME) {
+      return "Great! How can I help you today? You can ask about buying a new health plan, policy renewal, cashless claims, or network hospitals.";
     }
-    if (lower.includes("claim")) {
-      return "Claim ke liye aap cashless process use kar sakte hain network hospital mein. Main WhatsApp par claim guide bhej deti hoon.";
+    if (stage === STAGES.NEED_ANALYSIS || stage === STAGES.PROFILING) {
+      return "Got it! Could you please tell me your age and current city so I can suggest the best TATA AIG plan?";
     }
-    if (lower.includes("price") || lower.includes("cost") || lower.includes("premium") || lower.includes("batao")) {
-      return "Medicare plans ke premium lagbhag ₹8,000 se shuru hote hain. Main details WhatsApp par bhej deti hoon.";
-    }
-    if (lower.includes("human") || lower.includes("agent") || lower.includes("baat")) {
-      return "Main abhi aapko humare human advisor se connect kar deti hoon. Ek minute rukiye.";
-    }
-    return "Mujhe maaf kijiye, humare servers mein temporary issue aa raha hai. Kya aap please repeat kar sakte hain?";
+    return "Great! How can I assist you with your TATA AIG Health Insurance policy today?";
   }
 
-  if (lower.includes("hospital") || lower.includes("cashless") || lower.includes("network")) {
-    return "Our cashless network includes over 7,000 hospitals, including Lilavati in Mumbai and Max in Delhi. Let me send you the full list on WhatsApp.";
+  // Greetings ("hello", "hi", "hey", "namaste")
+  if (/^(hello|hi|hey|namaste|hullo)$/i.test(lower)) {
+    return "Hello! I am Asha from TATA AIG Health Insurance. Are you looking to buy a new policy, renew existing cover, or file a claim?";
   }
-  if (lower.includes("claims") || lower.includes("claim")) {
-    return "For claim support, you can file cashless claims directly at the network hospital, or submit bills for reimbursement. I will send you our claim guide on WhatsApp.";
+
+  // Intent: Buy policy
+  if (lower.includes("buy") || lower.includes("new") || lower.includes("purchase") || lower.includes("plan") || lower.includes("policy") || lower.includes("1")) {
+    return "Wonderful! Let's find the right health plan for you. Could you tell me your age and current city?";
   }
-  if (lower.includes("price") || lower.includes("cost") || lower.includes("premium") || lower.includes("expensive")) {
-    return "Our premiums typically range from ₹8,000 for individuals to about ₹15,000 for families depending on age. I will send a quote sheet over to you on WhatsApp.";
+
+  // Intent: Renewal
+  if (lower.includes("renew") || lower.includes("renewal") || lower.includes("expire") || lower.includes("2")) {
+    return "Sure! Please share your existing TATA AIG policy number or registered mobile number to proceed with renewal.";
   }
-  if (lower.includes("human") || lower.includes("agent") || lower.includes("advisor") || lower.includes("representative")) {
-    return "Connecting you to a human advisor now. Please hold.";
+
+  // Intent: Claims
+  if (lower.includes("claim") || lower.includes("bills") || lower.includes("reimburse") || lower.includes("3")) {
+    return "For claim support, you can file cashless claims directly at any of our 7,000+ network hospitals, or submit bills for reimbursement. Would you like our claim guide on WhatsApp?";
   }
-  return "I apologize, but I am facing a temporary network issue. Could you please repeat that, or should I arrange for a representative to call you back?";
+
+  // Intent: Cashless / Hospital
+  if (lower.includes("hospital") || lower.includes("cashless") || lower.includes("network") || lower.includes("4")) {
+    return "Our cashless network includes over 7,000 top hospitals across India, including Lilavati in Mumbai and Max in Delhi. Which city are you located in?";
+  }
+
+  // Intent: Human / Advisor
+  if (lower.includes("human") || lower.includes("agent") || lower.includes("advisor") || lower.includes("representative") || lower.includes("5")) {
+    return "I am connecting you to a human health insurance advisor right away. Please stay on the line.";
+  }
+
+  // Intent: Premium / Price
+  if (lower.includes("price") || lower.includes("cost") || lower.includes("premium") || lower.includes("expensive") || lower.includes("rate")) {
+    return "TATA AIG health plans start from approx ₹8,000/year for individuals and ₹15,000/year for families depending on age and sum insured.";
+  }
+
+  // Default natural conversational prompt
+  return "Thank you! To help you best, are you looking to buy a new health policy, renew an existing plan, or get help with cashless claims?";
 }
 
 function buildLocalFallbackResult(conversation, speechResult, tracker, reason, sourceFn) {
