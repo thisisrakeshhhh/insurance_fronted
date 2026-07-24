@@ -2,10 +2,10 @@ const CONFIG = {
   AGENT_NAME: "Asha",
   COMPANY_NAME: "TATA AIG Health Insurance",
   GATHER_LANGUAGE: "en-IN",
-  GEMINI_MODEL: "gemini-2.0-flash",
+  GEMINI_MODEL: "gemini-3.5-flash",
   OPENAI_MODEL: "gpt-4o-mini",
   MAX_TURNS: 20,
-  AI_TIMEOUT_MS: 3000,
+  AI_TIMEOUT_MS: 10000,
   GATHER_TIMEOUT_SEC: "7",
   MAX_OBJECTIONS: 3,
   CALLBACK_RETRY_MINUTES: 30,
@@ -58,6 +58,23 @@ const INTENT_TO_STAGE = {
   [INTENTS.COMPLAINT]: STAGES.HUMAN_TRANSFER,
   [INTENTS.GENERAL_INQUIRY]: STAGES.POLICY_QUESTIONS,
   [INTENTS.UNKNOWN]: STAGES.INTENT_SELECTION,
+};
+
+const DTMF_INTENT_MAP = {
+  "1": INTENTS.BUY_POLICY,
+  "2": INTENTS.RENEWAL,
+  "3": INTENTS.CLAIMS,
+  "4": INTENTS.CASHLESS_HOSPITAL,
+  "5": INTENTS.TALK_TO_ADVISOR,
+  "9": INTENTS.COMPLAINT,
+};
+
+const INTENT_INTRO_TEXT = {
+  [INTENTS.BUY_POLICY]: "Great, let's find the right health plan for you. Could you tell me your age?",
+  [INTENTS.RENEWAL]: "Sure, I can help with your renewal. What is your existing insurer's name?",
+  [INTENTS.CLAIMS]: "I can guide you through the claims process. Could you tell me your policy number or registered mobile?",
+  [INTENTS.CASHLESS_HOSPITAL]: "Sure, which city are you looking for a cashless hospital in?",
+  [INTENTS.COMPLAINT]: "I'm sorry to hear that. Let me connect you to someone who can help resolve this.",
 };
 
 const CALL_DIRECTION = {
@@ -247,11 +264,11 @@ function escapeXml(str = "") {
     .replace(/'/g, "&apos;");
 }
 
-function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Aditi" }) {
+function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Aditi", numDigits = null }) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech dtmf" action="${escapeXml(actionUrl)}" method="POST"
-          language="${language}" speechTimeout="auto" speechModel="experimental" enhanced="true" timeout="${CONFIG.GATHER_TIMEOUT_SEC}">
+          language="${language}" speechTimeout="auto" speechModel="experimental" enhanced="true" timeout="${CONFIG.GATHER_TIMEOUT_SEC}"${numDigits ? ` numDigits="${numDigits}" finishOnKey=""` : ""}>
     <Say voice="${voice}">${escapeXml(text)}</Say>
   </Gather>
   <Say voice="${voice}">Sorry, I didn't hear you clearly.</Say>
@@ -693,10 +710,7 @@ async function callGemini(env, prompt, systemPrompt = "", tracker) {
     throw err;
   }
 
-  let model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL;
-  if (model === "gemini-1.5-flash" || model === "gemini-2.5-flash" || !model) {
-    model = "gemini-2.0-flash";
-  }
+  const model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL || "gemini-1.5-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   if (tracker) {
@@ -707,7 +721,7 @@ async function callGemini(env, prompt, systemPrompt = "", tracker) {
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 350 },
+    generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
   };
   if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
@@ -764,7 +778,7 @@ async function callOpenAI(env, prompt, systemPrompt = "", tracker) {
     const resp = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, temperature: 0.3, max_tokens: 350 }),
+      body: JSON.stringify({ model, messages, temperature: 0.3, max_tokens: 1024 }),
     });
 
     if (tracker) {
@@ -1268,7 +1282,7 @@ function buildInitialConversation(direction, phone, customer) {
 function buildGreeting(direction) {
   return direction === CALL_DIRECTION.OUTBOUND
     ? "Hello! This is Asha, your AI voice assistant from TATA AIG Health Insurance. Am I speaking with the right person regarding your health insurance needs?"
-    : "Thank you for calling TATA AIG Health Insurance. My name is Asha. How can I help you today?";
+    : "Thank you for calling TATA AIG Health Insurance. My name is Asha. Press 1 to buy a new policy. Press 2 for renewal. Press 3 for claims. Press 4 for our cashless hospital list. Press 5 to speak with an advisor. Or just tell me what you need.";
 }
 
 async function handleDashboard(request, env) {
@@ -1395,8 +1409,60 @@ const routeCallIncoming = requireTwilioSignature(async (form, request, env, ctx,
     }
   }
 
-  return sayAndGather({ text: greeting, actionUrl: `${origin}/voice/gather`, language: env.GATHER_LANGUAGE || CONFIG.GATHER_LANGUAGE });
+  return sayAndGather({
+    text: greeting,
+    actionUrl: `${origin}/voice/gather`,
+    language: env.GATHER_LANGUAGE || CONFIG.GATHER_LANGUAGE,
+    numDigits: direction === CALL_DIRECTION.INBOUND ? 1 : null,
+  });
 });
+
+async function handleDtmfIntentSelection(env, ctx, conversation, digit, callSid, origin, tracker) {
+  const intent = DTMF_INTENT_MAP[digit];
+  conversation.turnCount = (conversation.turnCount || 0) + 1;
+  const customerMsg = `[Pressed ${digit}]`;
+  conversation.history.push({ role: "customer", text: customerMsg });
+
+  if (env.DB) {
+    await dbLogConversationTurn(env.DB, callSid, "customer", customerMsg, conversation.stage, tracker);
+  }
+
+  if (!intent) {
+    const replyText = "Sorry, that's not a valid option. Press 1 for buying a policy, 2 for renewal, 3 for claims, 4 for hospitals, or 5 for an advisor.";
+    conversation.history.push({ role: "asha", text: replyText });
+    if (env.DB) {
+      await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
+      await dbLogConversationTurn(env.DB, callSid, "asha", replyText, conversation.stage, tracker);
+    }
+    return sayAndGather({ text: replyText, actionUrl: `${origin}/voice/gather`, language: env.GATHER_LANGUAGE, numDigits: 1 });
+  }
+
+  conversation.intent = intent;
+
+  if (intent === INTENTS.TALK_TO_ADVISOR || intent === INTENTS.COMPLAINT) {
+    conversation.stage = STAGES.HUMAN_TRANSFER;
+    conversation.transferredToHuman = true;
+    const replyText = INTENT_INTRO_TEXT[intent] || "Connecting you to a human advisor now. Please hold.";
+    conversation.history.push({ role: "asha", text: replyText });
+    if (env.DB) {
+      await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), callSid).run();
+      await dbLogConversationTurn(env.DB, callSid, "asha", replyText, conversation.stage, tracker);
+    }
+    ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, callSid, tracker));
+    return sayAndDial({ text: replyText, dialNumber: env.HUMAN_TRANSFER_NUMBER });
+  }
+
+  conversation.stage = INTENT_TO_STAGE[intent] || STAGES.PROFILING;
+  const replyText = INTENT_INTRO_TEXT[intent] || "Got it, let's continue.";
+  conversation.history.push({ role: "asha", text: replyText });
+
+  if (env.DB) {
+    await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), callSid).run();
+    await dbLogConversationTurn(env.DB, callSid, "asha", replyText, conversation.stage, tracker);
+  }
+
+  return sayAndGather({ text: replyText, actionUrl: `${origin}/voice/gather`, language: env.GATHER_LANGUAGE || CONFIG.GATHER_LANGUAGE });
+}
 
 const routeCallGather = requireTwilioSignature(async (form, request, env, ctx, tracker) => {
   const callSid = form.get("CallSid") || "";
@@ -1430,6 +1496,11 @@ const routeCallGather = requireTwilioSignature(async (form, request, env, ctx, t
   }
 
   const conversation = JSON.parse(callRow.session_data || "{}");
+
+  if (digitsResult && (conversation.stage === STAGES.WELCOME || conversation.stage === STAGES.INTENT_SELECTION || conversation.stage === STAGES.GREETING)) {
+    return await handleDtmfIntentSelection(env, ctx, conversation, digitsResult, callSid, origin, tracker);
+  }
+
   const { replyText, isEnding, wantsHuman } = await processTurn(env, conversation, inputResult, callSid, callRow, tracker);
 
   if (wantsHuman) {
@@ -1843,6 +1914,8 @@ function handleDebugEnv(request, env, tracker) {
   );
 }
 
+
+
 function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": origin || "*",
@@ -1938,6 +2011,78 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
   if (!callRow) return jsonResponse({ error: "Session not found" }, 404, reqOrigin, tracker);
 
   const conversation = JSON.parse(callRow.session_data || "{}");
+
+  if (speechResult && /^[1-9]$/.test(speechResult.trim()) && (conversation.stage === STAGES.WELCOME || conversation.stage === STAGES.INTENT_SELECTION || conversation.stage === STAGES.GREETING)) {
+    const digit = speechResult.trim();
+    const intent = DTMF_INTENT_MAP[digit];
+    conversation.turnCount = (conversation.turnCount || 0) + 1;
+    const customerMsg = `[Pressed ${digit}]`;
+    conversation.history.push({ role: "customer", text: customerMsg });
+    if (env.DB) {
+      await dbLogConversationTurn(env.DB, sessionId, "customer", customerMsg, conversation.stage, tracker);
+    }
+
+    let replyText = "";
+    let isEnding = false;
+    let wantsHuman = false;
+
+    if (!intent) {
+      replyText = "Sorry, that's not a valid option. Press 1 for buying a policy, 2 for renewal, 3 for claims, 4 for hospitals, or 5 for an advisor.";
+      conversation.history.push({ role: "asha", text: replyText });
+      if (env.DB) {
+        await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), sessionId).run();
+        await dbLogConversationTurn(env.DB, sessionId, "asha", replyText, conversation.stage, tracker);
+      }
+    } else {
+      conversation.intent = intent;
+      if (intent === INTENTS.TALK_TO_ADVISOR || intent === INTENTS.COMPLAINT) {
+        conversation.stage = STAGES.HUMAN_TRANSFER;
+        conversation.transferredToHuman = true;
+        wantsHuman = true;
+        replyText = INTENT_INTRO_TEXT[intent] || "Connecting you to a human advisor now. Please hold.";
+        conversation.history.push({ role: "asha", text: replyText });
+        if (env.DB) {
+          await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), sessionId).run();
+          await dbLogConversationTurn(env.DB, sessionId, "asha", replyText, conversation.stage, tracker);
+        }
+        ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, sessionId, tracker));
+      } else {
+        conversation.stage = INTENT_TO_STAGE[intent] || STAGES.PROFILING;
+        replyText = INTENT_INTRO_TEXT[intent] || "Got it, let's continue.";
+        conversation.history.push({ role: "asha", text: replyText });
+        if (env.DB) {
+          await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), sessionId).run();
+          await dbLogConversationTurn(env.DB, sessionId, "asha", replyText, conversation.stage, tracker);
+        }
+      }
+    }
+
+    const metrics = tracker.finish();
+    return jsonResponse(
+      {
+        spokenResponse: replyText,
+        stage: conversation.stage,
+        ended: isEnding,
+        detectedIntent: intent || conversation.intent,
+        intentConfidence: intent ? 1.0 : null,
+        objectionType: null,
+        wantsHuman,
+        extractedFields: {},
+        customer: conversation.customer,
+        missingFields: conversation.missingFields,
+        quote: conversation.quote,
+        summary: conversation.summary,
+        turnCount: conversation.turnCount,
+        latencyMs: metrics.totalRequestMs,
+        model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
+        timings: metrics,
+        aiTrace: tracker.aiTrace,
+      },
+      200,
+      reqOrigin,
+      tracker
+    );
+  }
 
   const { replyText, isEnding, wantsHuman, aiResult } = await processTurn(env, conversation, speechResult, sessionId, callRow, tracker);
 
@@ -2170,6 +2315,7 @@ export default {
       if (url.pathname === "/api/feedback" && method === "POST") return await handleApiFeedback(request, env, tracker);
       if (url.pathname === "/api/debug/routes" && method === "GET") return handleDebugRoutes(request, env, tracker);
       if (url.pathname === "/api/debug/env" && method === "GET") return handleDebugEnv(request, env, tracker);
+
 
       return jsonResponse({ error: "Not Found", path: url.pathname }, 404, reqOrigin, tracker);
     } catch (err) {

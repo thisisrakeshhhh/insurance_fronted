@@ -12,7 +12,7 @@ import { stageColor } from '@/utils/format'
 import { PhoneOff, User, Info } from 'lucide-react'
 
 export function VoiceChat() {
-  const { startSession, stopSession, startManualListening } = useVoiceSession()
+  const { startSession, stopSession, startManualListening, sendTurn } = useVoiceSession()
   const { status, messages, currentCustomer, currentStage, currentModel, lastLatencyMs, sessionStartTime, lastTurn, sessionId } = useVoiceStore()
   const { devPhone } = useSettingsStore()
   const [liveTranscript] = useState('')
@@ -103,6 +103,35 @@ export function VoiceChat() {
         <TranscriptPanel messages={messages} liveTranscript={liveTranscript} />
 
         <div className="flex flex-col items-center gap-4 px-6 py-5 border-t border-border bg-bg-card/30">
+          {hasSession && (currentStage === 'welcome' || currentStage === 'intent_selection' || currentStage === 'greeting') && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="w-full max-w-md mb-2 p-4 rounded-2xl border border-border/80 bg-bg-card/40 backdrop-blur-sm shadow-lg"
+            >
+              <p className="text-[10px] font-bold text-text-muted text-center mb-3 tracking-widest uppercase">Direct Keypad Routing</p>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { key: '1', label: 'Buy Policy', desc: 'Find plan' },
+                  { key: '2', label: 'Renewal', desc: 'Renew policy' },
+                  { key: '3', label: 'Claims', desc: 'Claims help' },
+                  { key: '4', label: 'Hospitals', desc: 'Find hospital' },
+                  { key: '5', label: 'Advisor', desc: 'Talk to advisor' },
+                  { key: '9', label: 'Complaint', desc: 'File complaint' },
+                ].map((opt) => (
+                  <button
+                    key={opt.key}
+                    onClick={() => sendTurn(opt.key)}
+                    className="flex flex-col items-center justify-center p-2 rounded-xl bg-bg-surface border border-border hover:border-accent/50 hover:bg-accent/5 transition-all text-center group cursor-pointer text-text-primary"
+                  >
+                    <span className="text-md font-bold text-accent group-hover:scale-115 transition-transform">{opt.key}</span>
+                    <span className="text-[11px] font-semibold mt-0.5">{opt.label}</span>
+                    <span className="text-[9px] text-text-muted leading-tight mt-0.5">{opt.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          )}
           <Waveform status={status} />
           <MicButton status={status} onStart={handleStart} onStop={handleStop} hasSession={hasSession} />
           {liveTranscript && (
