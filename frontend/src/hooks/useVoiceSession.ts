@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 import { toast } from 'sonner'
-import { startBrowserSession, sendBrowserTurn } from '@/api/worker'
+import { startBrowserSession, sendBrowserTurn, makeTestCall } from '@/api/worker'
 import { useVoiceStore, useSettingsStore } from '@/store'
 import { useSpeech } from './useSpeech'
 import type { Message } from '@/types'
@@ -194,12 +194,41 @@ export function useVoiceSession() {
     }
   }, [store, speech])
 
+  const triggerPhoneCall = useCallback(async (phone: string) => {
+    if (!phone) {
+      toast.error('Please enter a valid phone number')
+      return
+    }
+    store.setStatus('connecting')
+    toast.info(`Initiating phone call to ${phone}...`)
+    try {
+      const res = await makeTestCall(phone)
+      if (res.success && res.callSid) {
+        toast.success(`Call placed! SID: ${res.callSid}`)
+        store.setSessionId(res.callSid)
+        store.setStatus('speaking')
+        addMsg('system', `Outbound Twilio call placed to ${phone} (CallSid: ${res.callSid})`)
+      } else {
+        const errorMsg = res.error || 'Failed to place call'
+        toast.error(errorMsg)
+        store.setStatus('error')
+        addMsg('system', `Call Error: ${errorMsg}`)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Call failed'
+      toast.error(`Call failed: ${msg}`)
+      store.setStatus('error')
+      addMsg('system', `Call Error: ${msg}`)
+    }
+  }, [store, addMsg])
+
   return {
     startSession,
     stopSession,
     sendTurn,
     startManualListening,
     toggleMute,
+    triggerPhoneCall,
     isStarting: startingRef.current,
   }
 }

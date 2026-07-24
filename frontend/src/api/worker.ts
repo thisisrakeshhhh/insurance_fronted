@@ -26,6 +26,13 @@ export async function startBrowserSession(direction: 'outbound' | 'inbound', pho
   })
 }
 
+export async function makeTestCall(to: string): Promise<{ success: boolean; callSid?: string; error?: string }> {
+  return workerFetch<{ success: boolean; callSid?: string; error?: string }>('/test-call', {
+    method: 'POST',
+    body: JSON.stringify({ to }),
+  })
+}
+
 export async function sendBrowserTurn(sessionId: string, speechResult: string): Promise<TurnResponse> {
   return workerFetch<TurnResponse>('/voice/browser-turn', {
     method: 'POST',
