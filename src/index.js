@@ -10,6 +10,7 @@ const CONFIG = {
   MAX_OBJECTIONS: 3,
   CALLBACK_RETRY_MINUTES: 30,
   MAX_CALLBACK_ATTEMPTS: 3,
+  INTENT_CONFIDENCE_THRESHOLD: 0.6,
 };
 
 const STAGES = {
@@ -60,6 +61,32 @@ const INTENT_TO_STAGE = {
   [INTENTS.UNKNOWN]: STAGES.INTENT_SELECTION,
 };
 
+// ---------------------------------------------------------------------------
+// TASK-BASED FIELD REQUIREMENTS
+// Each intent only asks for what it actually needs to complete ITS task.
+// This is the single source of truth for both the state machine
+// (getMissingFields) and the AI prompt (buildAshaSystemPrompt), so the two
+// can never drift apart and ask for things the flow doesn't need.
+// ---------------------------------------------------------------------------
+const INTENT_REQUIRED_FIELDS = {
+  [INTENTS.BUY_POLICY]: ["age", "city", "family_members", "medical_history", "budget", "buying_timeline"],
+  [INTENTS.RENEWAL]: ["policy_number", "renewal_date"], // see getMissingFields: policy_number OR existing_insurer counts
+  [INTENTS.CLAIMS]: ["policy_number", "hospital_name"],
+  [INTENTS.CASHLESS_HOSPITAL]: ["city"],
+  [INTENTS.POLICY_STATUS]: ["policy_number"],
+  [INTENTS.PREMIUM_QUERY]: ["policy_number"],
+  [INTENTS.TAX_BENEFITS]: [],
+  [INTENTS.TALK_TO_ADVISOR]: [],
+  [INTENTS.COMPLAINT]: [],
+  [INTENTS.GENERAL_INQUIRY]: [],
+  [INTENTS.UNKNOWN]: [],
+};
+
+// Fields required specifically to generate a BUY_POLICY quote (Problem 6:
+// recommendation used to fire on just age+family_members, producing wrong
+// plans). All of these must be present before recommendPlan() runs.
+const QUOTE_REQUIRED_FIELDS = ["age", "family_members", "medical_history", "budget"];
+
 const DTMF_INTENT_MAP = {
   "1": INTENTS.BUY_POLICY,
   "2": INTENTS.RENEWAL,
@@ -71,10 +98,14 @@ const DTMF_INTENT_MAP = {
 
 const INTENT_INTRO_TEXT = {
   [INTENTS.BUY_POLICY]: "Great, let's find the right health plan for you. Could you tell me your age?",
-  [INTENTS.RENEWAL]: "Sure, I can help with your renewal. What is your existing insurer's name?",
-  [INTENTS.CLAIMS]: "I can guide you through the claims process. Could you tell me your policy number or registered mobile?",
+  [INTENTS.RENEWAL]: "Sure, I can help with your renewal. Could you share your policy number, or the name of your existing insurer?",
+  [INTENTS.CLAIMS]: "I'm sorry to hear that. Could you tell me your policy number so I can guide you through the claim?",
   [INTENTS.CASHLESS_HOSPITAL]: "Sure, which city are you looking for a cashless hospital in?",
+  [INTENTS.POLICY_STATUS]: "Sure, could you share your policy number so I can check the status for you?",
+  [INTENTS.PREMIUM_QUERY]: "Sure, could you share your policy number so I can look up your premium details?",
+  [INTENTS.TAX_BENEFITS]: "Sure — your health insurance premium can qualify for a tax deduction under Section 80D. What would you like to know?",
   [INTENTS.COMPLAINT]: "I'm sorry to hear that. Let me connect you to someone who can help resolve this.",
+  [INTENTS.GENERAL_INQUIRY]: "Sure, happy to help. What would you like to know?",
 };
 
 const CALL_DIRECTION = {
@@ -110,6 +141,13 @@ const CASHLESS_NETWORK = {
 const EXPLICIT_END_REGEX = /\b(bye|goodbye|that'?s all|no more questions|hang up|end (the )?call|not interested,? thanks|nahi chahiye|thank you,? ?bye|band karo|rakhta hu|rakhti hu)\b/i;
 const PERMISSION_DENIED_REGEX = /\b(not now|no time|can'?t talk|busy right now|call (me )?later|abhi nahi|busy hu|later)\b/i;
 const TRANSFER_KEYWORDS = ["advisor", "human", "agent", "representative", "executive", "call me", "sales person", "baat kar", "operator"];
+
+// Fast-path regexes (Problem 8): recognize identifiers the caller volunteers
+// unprompted — e.g. "my policy number is 445566" — so we never re-ask for
+// something that was already said, regardless of what the AI extracts.
+const POLICY_NUMBER_REGEX = /\bpolic(?:y|ies)?\D{0,15}?(\d{5,12})\b/i;
+const BARE_LONG_NUMBER_REGEX = /\b(\d{6,12})\b/;
+const MOBILE_REGEX = /\b([6-9]\d{9})\b/;
 
 class PerformanceTracker {
   constructor() {
@@ -189,16 +227,25 @@ const INSURANCE_KNOWLEDGE = `TATA AIG Health: 7,000+ cashless hospitals. Tax Ded
 
 function buildAshaSystemPrompt(conversation, direction) {
   const isOutbound = direction === CALL_DIRECTION.OUTBOUND;
+  const intent = conversation.intent || INTENTS.UNKNOWN;
+  const isTaskKnown = intent !== INTENTS.UNKNOWN;
+
   return `${ASHA_PERSONALITY}
 ${INSURANCE_KNOWLEDGE}
-CONTEXT: Direction: ${direction} (${isOutbound ? "outbound" : "inbound"}), Stage: ${conversation.stage}, Profile: ${JSON.stringify(conversation.customer)}, Missing: ${JSON.stringify(conversation.missingFields)}
+CONTEXT: Direction: ${direction} (${isOutbound ? "outbound" : "inbound"}), Stage: ${conversation.stage}, Active task/intent: ${intent}, Profile so far: ${JSON.stringify(conversation.customer)}
+FIELDS STILL NEEDED FOR THIS TASK ONLY: ${JSON.stringify(conversation.missingFields || [])}
 RULES:
-1. Reply naturally for CURRENT stage.
-2. Set wantsHuman if human transfer keywords mentioned.
-3. CRITICAL: spokenResponse MUST be 1-2 short friendly sentences. NO JSON or code in spokenResponse.
-4. If profiling, ask for ONE missing field from: ${JSON.stringify(conversation.missingFields)}.
+1. Reply naturally for the CURRENT stage and the CURRENT active task only.
+2. TASK SCOPE IS STRICT: never ask for a field that is not in "FIELDS STILL NEEDED FOR THIS TASK ONLY". For example, do not ask age, budget, or medical history during a renewal, claim, or hospital-search task — those only need what's listed above. Full per-intent requirement map, for reference only (do not ask outside the active intent's list): ${JSON.stringify(INTENT_REQUIRED_FIELDS)}.
+3. If "FIELDS STILL NEEDED FOR THIS TASK ONLY" is empty, do NOT ask any further profiling question — acknowledge and move toward closing the task.
+4. If the customer already volunteered a value in their message (a policy number, city, mobile number, etc.), extract it into extractedFields even if it wasn't explicitly asked for. Never ask again for something already said.
+5. Ask for at most ONE missing field per turn, chosen from the list above.
+6. Set wantsHuman true if human transfer keywords are mentioned.
+7. If intentConfidence for a newly detected intent is below 0.6, phrase spokenResponse as a brief one-line confirmation of the intent rather than proceeding into task questions.
+8. CRITICAL: spokenResponse MUST be 1-2 short friendly sentences. NO JSON or code in spokenResponse.
+${isTaskKnown ? "" : "9. No task has been identified yet — gently ask what the customer needs (buy a policy, renew, claim, find a hospital, or speak to an advisor)."}
 OUTPUT FORMAT: JSON only
-{"extractedFields":{"name":null,"email":null,"age":null,"city":null,"pincode":null,"family_members":null,"existing_insurer":null,"renewal_date":null,"medical_history":null,"budget":null,"buying_timeline":null,"appointment_datetime":null},"detectedIntent":"buy_policy","intentConfidence":0.9,"objectionType":null,"wantsHuman":false,"spokenResponse":"text","callSummary":"summary"}`;
+{"extractedFields":{"name":null,"email":null,"age":null,"city":null,"pincode":null,"family_members":null,"existing_insurer":null,"renewal_date":null,"medical_history":null,"budget":null,"buying_timeline":null,"appointment_datetime":null,"policy_number":null,"hospital_name":null,"insured_person":null},"detectedIntent":"buy_policy","intentConfidence":0.9,"objectionType":null,"wantsHuman":false,"spokenResponse":"text","callSummary":"summary"}`;
 }
 
 function buildUserPrompt(speechResult, history) {
@@ -241,6 +288,28 @@ const log = createLogger("voice-agent");
 function sanitizeSpeech(text, maxLen = 500) {
   if (!text) return "";
   return String(text).trim().slice(0, maxLen);
+}
+
+// Problem 8 fix: recognize policy numbers / mobile numbers a caller
+// volunteers unprompted, independent of the AI provider. Runs even when the
+// AI call times out, so the local fallback stops asking for things already
+// said.
+function extractFastPathFields(speech) {
+  const fields = {};
+  if (!speech) return fields;
+
+  const explicitPolicy = speech.match(POLICY_NUMBER_REGEX);
+  if (explicitPolicy) {
+    fields.policy_number = explicitPolicy[1];
+  } else if (/polic/i.test(speech)) {
+    const bare = speech.match(BARE_LONG_NUMBER_REGEX);
+    if (bare) fields.policy_number = bare[1];
+  }
+
+  const mobile = speech.match(MOBILE_REGEX);
+  if (mobile) fields.registered_mobile = mobile[1];
+
+  return fields;
 }
 
 async function withTimeout(promise, ms, fallbackValue) {
@@ -340,23 +409,29 @@ function requireTwilioSignature(handler) {
   };
 }
 
-function getMissingFields(customer) {
-  const fields = [
-    { key: "age", label: "Age" },
-    { key: "city", label: "City" },
-    { key: "family_members", label: "Family Members" },
-    { key: "existing_insurer", label: "Existing Insurance" },
-    { key: "medical_history", label: "Medical History" },
-    { key: "budget", label: "Budget" },
-    { key: "buying_timeline", label: "Buying Timeline" },
-  ];
+// ---------------------------------------------------------------------------
+// Task-aware missing-field resolution (Problems 1, 2, 3, 4, 12).
+// Each intent has its own required-field list (INTENT_REQUIRED_FIELDS).
+// RENEWAL gets a small custom rule: a policy number OR an existing-insurer
+// name identifies the policy, so only one of the two is required — not both,
+// and never age/budget/medical history.
+// ---------------------------------------------------------------------------
+function getMissingFields(customer, intent) {
+  const activeIntent = intent || INTENTS.UNKNOWN;
 
-  return fields
-    .filter((f) => {
-      const val = customer[f.key];
-      return val === undefined || val === null || val === "" || String(val).toLowerCase() === "unknown";
-    })
-    .map((f) => f.key);
+  if (activeIntent === INTENTS.RENEWAL) {
+    const missing = [];
+    const hasIdentifier = !!(customer.policy_number || customer.existing_insurer);
+    if (!hasIdentifier) missing.push("policy_number");
+    if (!customer.renewal_date) missing.push("renewal_date");
+    return missing;
+  }
+
+  const required = INTENT_REQUIRED_FIELDS[activeIntent] || [];
+  return required.filter((key) => {
+    const val = customer[key];
+    return val === undefined || val === null || val === "" || String(val).toLowerCase() === "unknown";
+  });
 }
 
 function calculateLeadScoreAndTier(conversation) {
@@ -548,8 +623,14 @@ async function pushToSheets(env, row, tracker) {
   return tracker ? tracker.measureAsync("sheetsRequestMs", runReq) : runReq();
 }
 
+// ---------------------------------------------------------------------------
+// State machine (Problems 2, 4, 7): every inbound intent now has its own
+// completion condition instead of funnelling through one generic PROFILING
+// state. A task's stage only moves to CLOSING once ITS OWN missingFields
+// list (computed per-intent above) is empty.
+// ---------------------------------------------------------------------------
 function computeNextStage(conversation, aiResult, speechResult) {
-  const { stage, direction, missingFields, objectionCount, quote, turnCount } = conversation;
+  const { stage, direction, missingFields, objectionCount, quote, turnCount, intent } = conversation;
 
   if (turnCount >= CONFIG.MAX_TURNS) return STAGES.CLOSING;
   if (aiResult.wantsHuman) return STAGES.HUMAN_TRANSFER;
@@ -580,31 +661,46 @@ function computeNextStage(conversation, aiResult, speechResult) {
     }
   }
 
+  // INBOUND: task-based branching. Once intent is known, each branch is
+  // independent and only asks for its own required fields.
   switch (stage) {
     case STAGES.WELCOME:
     case STAGES.INTENT_SELECTION: {
-      const intent = aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN ? aiResult.detectedIntent : conversation.intent;
-      return INTENT_TO_STAGE[intent] || STAGES.INTENT_SELECTION;
+      const detected = aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN ? aiResult.detectedIntent : intent;
+      return INTENT_TO_STAGE[detected] || STAGES.INTENT_SELECTION;
     }
+
     case STAGES.BUY_POLICY:
-      if (missingFields.length === 0) return quote ? STAGES.RECOMMENDATION : STAGES.PROFILING;
-      return STAGES.PROFILING;
     case STAGES.PROFILING:
       if (missingFields.length > 0) return STAGES.PROFILING;
       return STAGES.RECOMMENDATION;
+
     case STAGES.RECOMMENDATION:
       if (aiResult.objectionType) return STAGES.OBJECTION_HANDLING;
       return STAGES.APPOINTMENT;
+
     case STAGES.OBJECTION_HANDLING:
       if (objectionCount + (aiResult.objectionType ? 1 : 0) >= CONFIG.MAX_OBJECTIONS) return STAGES.CLOSING;
       return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
+
     case STAGES.APPOINTMENT:
       return aiResult.extractedFields && aiResult.extractedFields.appointment_datetime ? STAGES.CLOSING : STAGES.APPOINTMENT;
+
+    // Task-complete-and-close branches (Problem 7): renewal, claims, and
+    // hospital search each end the moment their own small field list is
+    // satisfied — they never fall through to profiling/recommendation.
     case STAGES.RENEWAL:
+      return missingFields.length === 0 ? STAGES.CLOSING : STAGES.RENEWAL;
+
     case STAGES.CLAIMS:
+      return missingFields.length === 0 ? STAGES.CLOSING : STAGES.CLAIMS;
+
     case STAGES.HOSPITAL:
+      return missingFields.length === 0 ? STAGES.CLOSING : STAGES.HOSPITAL;
+
     case STAGES.POLICY_QUESTIONS:
-      return stage;
+      return STAGES.CLOSING;
+
     case STAGES.CLOSING:
       return STAGES.ENDED;
     default:
@@ -998,6 +1094,11 @@ async function dbUpdateCustomer(db, phone, customerData, tracker) {
     budget: customerData.budget || null,
     buying_timeline: customerData.buying_timeline || null,
   };
+  // NOTE: policy_number, hospital_name, insured_person, and
+  // registered_mobile are intentionally NOT persisted here — they are new
+  // in-session fields (see buildInitialConversation) and the customers
+  // table schema wasn't extended for them. Add matching columns and include
+  // them above if they should survive across calls.
   const entries = Object.entries(allFields).filter(([, v]) => v !== null);
   if (entries.length === 0) return;
 
@@ -1155,6 +1256,14 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     }
   }
 
+  // Fast-path extraction run first to capture unprompted details immediately
+  const fastFields = extractFastPathFields(speechResult);
+  for (const [key, value] of Object.entries(fastFields)) {
+    if (value !== null && value !== undefined && value !== "") {
+      conversation.customer[key] = value;
+    }
+  }
+
   const speechLower = speechResult.toLowerCase();
   const matchedTransferKeyword = TRANSFER_KEYWORDS.find((k) => speechLower.includes(k));
 
@@ -1183,9 +1292,19 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
       conversation.customer[key] = value;
     }
   }
-  conversation.missingFields = getMissingFields(conversation.customer);
+  
+  if (aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN) {
+    conversation.intent = aiResult.detectedIntent;
+  }
+  
+  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
 
-  if (conversation.customer.age && conversation.customer.family_members && !conversation.quote) {
+  const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
+    const val = conversation.customer[key];
+    return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
+  });
+
+  if (hasAllQuoteFields && !conversation.quote) {
     conversation.quote = tracker
       ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
       : recommendPlan(conversation.customer);
@@ -1246,10 +1365,11 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
 }
 
 function buildInitialConversation(direction, phone, customer) {
-  const missingFields = getMissingFields(customer);
+  const initialIntent = direction === CALL_DIRECTION.OUTBOUND ? INTENTS.BUY_POLICY : INTENTS.UNKNOWN;
+  const missingFields = getMissingFields(customer, initialIntent);
   return {
     direction,
-    intent: direction === CALL_DIRECTION.OUTBOUND ? INTENTS.BUY_POLICY : INTENTS.UNKNOWN,
+    intent: initialIntent,
     history: [],
     customer: {
       phone,

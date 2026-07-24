@@ -20,7 +20,7 @@ export function VoiceChat() {
   const hasSession = !!sessionId && status !== 'ended'
 
   const handleStart = () => {
-    if (!hasSession || status === 'ended') {
+    if (!hasSession) {
       startSession('outbound', devPhone || '+918567890273')
     } else {
       startManualListening()
