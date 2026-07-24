@@ -2,7 +2,7 @@ const CONFIG = {
   AGENT_NAME: "Asha",
   COMPANY_NAME: "TATA AIG Health Insurance",
   GATHER_LANGUAGE: "en-IN",
-  GEMINI_MODEL: "gemini-2.5-flash",
+  GEMINI_MODEL: "gemini-1.5-flash",
   OPENAI_MODEL: "gpt-4o-mini",
   MAX_TURNS: 20,
   AI_TIMEOUT_MS: 10000,

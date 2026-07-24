@@ -10,9 +10,9 @@ interface Props {
 export function AIInspector({ lastTurn }: Props) {
   if (!lastTurn) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-3 text-text-muted p-6">
-        <Brain size={36} className="opacity-30" />
-        <p className="text-sm text-center">AI data will appear here after the first conversation turn.</p>
+      <div className="flex flex-col items-center justify-center gap-3 text-text-muted p-6 border border-border/40 rounded-2xl bg-bg-card/20">
+        <Brain size={28} className="opacity-30 animate-pulse" />
+        <p className="text-xs text-center">AI inspector data will appear here during the active call session.</p>
       </div>
     )
   }
@@ -20,7 +20,7 @@ export function AIInspector({ lastTurn }: Props) {
   const fields = Object.entries(lastTurn.extractedFields || {}).filter(([, v]) => v != null && v !== '')
 
   return (
-    <div className="flex flex-col gap-4 p-4 overflow-y-auto h-full text-sm">
+    <div className="flex flex-col gap-4 p-4 text-sm">
       <div className="flex items-center gap-2">
         <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${stageColor(lastTurn.stage)}`}>
           {lastTurn.stage}
