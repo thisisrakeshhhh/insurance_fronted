@@ -3,9 +3,10 @@ import type { VoiceStatus } from '@/types'
 
 interface Props {
   status: VoiceStatus
+  hasSession?: boolean
 }
 
-export function Waveform({ status }: Props) {
+export function Waveform({ status, hasSession }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const animRef = useRef<number>(0)
   const frameRef = useRef(0)
@@ -30,6 +31,8 @@ export function Waveform({ status }: Props) {
           amplitude = Math.sin(frameRef.current * 0.09 + i * 0.3) * 16 + 10
         } else if (status === 'thinking') {
           amplitude = Math.sin(frameRef.current * 0.06 + i * 0.5) * 10 + 6
+        } else if (hasSession) {
+          amplitude = Math.sin(frameRef.current * 0.04 + i * 0.2) * 6 + 6
         }
 
         const x = i * (barW + 2)
@@ -46,6 +49,9 @@ export function Waveform({ status }: Props) {
         } else if (status === 'thinking') {
           gradient.addColorStop(0, '#8b5cf6')
           gradient.addColorStop(1, '#a78bfa')
+        } else if (hasSession) {
+          gradient.addColorStop(0, '#10b981')
+          gradient.addColorStop(1, '#059669')
         } else {
           gradient.addColorStop(0, '#334155')
           gradient.addColorStop(1, '#475569')
@@ -63,7 +69,7 @@ export function Waveform({ status }: Props) {
 
     draw()
     return () => cancelAnimationFrame(animRef.current)
-  }, [status])
+  }, [status, hasSession])
 
   return (
     <canvas

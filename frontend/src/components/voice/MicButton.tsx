@@ -44,7 +44,7 @@ export function MicButton({ status, onStart, onStop, hasSession }: Props) {
   const getRingClass = () => {
     if (isListening) return 'ring-4 ring-blue-500/60 shadow-[0_0_30px_rgba(59,130,246,0.5)]'
     if (isThinking) return 'ring-4 ring-violet-500/60 shadow-[0_0_30px_rgba(139,92,246,0.5)]'
-    if (isSpeaking) return 'ring-4 ring-emerald-500/60 shadow-[0_0_30px_rgba(16,185,129,0.5)]'
+    if (isSpeaking || hasSession) return 'ring-4 ring-emerald-500/60 shadow-[0_0_30px_rgba(16,185,129,0.5)]'
     if (isConnecting) return 'ring-4 ring-yellow-500/40'
     return 'ring-2 ring-white/10 hover:ring-accent/50'
   }
@@ -52,7 +52,7 @@ export function MicButton({ status, onStart, onStop, hasSession }: Props) {
   const getBgClass = () => {
     if (isListening) return 'bg-blue-600'
     if (isThinking) return 'bg-violet-600'
-    if (isSpeaking) return 'bg-emerald-600'
+    if (isSpeaking || hasSession) return 'bg-emerald-600'
     if (isEnded) return 'bg-accent hover:bg-accent-hover'
     return 'bg-accent hover:bg-accent-hover'
   }
