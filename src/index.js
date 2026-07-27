@@ -1256,6 +1256,20 @@ function buildLocalFallbackResult(conversation, speechResult, tracker, reason, s
     spokenResponse = getLocalFallbackResponse(speechResult, conversation.stage);
   }
 
+  // Loop/Reprompt prevention check: If repeating the same prompt, prepend a natural clarification
+  if (conversation.lastQuestion && (spokenResponse === conversation.lastQuestion || spokenResponse.includes(conversation.lastQuestion))) {
+    const repromptPrefixes = [
+      "Sorry, I didn't quite catch that. ",
+      "Could you please repeat that? ",
+      "Apologies, I missed that. ",
+      "Sorry about that, could you say it again? "
+    ];
+    const prefix = repromptPrefixes[Math.floor(Math.random() * repromptPrefixes.length)];
+    if (!spokenResponse.startsWith("Sorry") && !spokenResponse.startsWith("Could") && !spokenResponse.startsWith("Apologies")) {
+      spokenResponse = prefix + spokenResponse.charAt(0).toLowerCase() + spokenResponse.slice(1);
+    }
+  }
+
   return {
     extractedFields: {},
     detectedIntent: conversation.intent || INTENTS.UNKNOWN,
