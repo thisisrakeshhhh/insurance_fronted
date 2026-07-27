@@ -20,14 +20,14 @@ export function Dashboard() {
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      className="flex flex-col gap-6 p-6 overflow-y-auto h-full"
+      className="flex flex-col gap-4 md:gap-6 p-4 md:p-6 overflow-y-auto h-full mobile-content-pb"
     >
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-text-primary">Dashboard</h1>
-          <p className="text-sm text-text-muted mt-0.5">Asha AI Voice Agent Overview</p>
+          <h1 className="text-lg md:text-xl font-bold text-text-primary">Dashboard</h1>
+          <p className="text-xs md:text-sm text-text-muted mt-0.5">Asha AI Voice Agent Overview</p>
         </div>
-        <WorkerStatusBadge />
+        <div className="hidden md:block"><WorkerStatusBadge /></div>
       </div>
 
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
@@ -37,7 +37,8 @@ export function Dashboard() {
         <StatsCard label="Session Status" value="Ready" sub="Worker connected" icon={<CheckCircle size={16} />} color="#10b981" />
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      {/* Charts — 2-col desktop, 1-col mobile */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-bg-card border border-border rounded-xl p-5">
           <div className="flex items-center gap-2 mb-4">
             <Users size={15} className="text-accent" />

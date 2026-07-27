@@ -15,6 +15,11 @@
   --text-muted: #94a3b8;
   --border: #1e1e2e;
   --danger: #f43f5e;
+  /* Safe area insets for iPhone notch / home bar */
+  --sat: env(safe-area-inset-top, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
 }
 
 * {
@@ -26,7 +31,28 @@
 html, body, #root {
   height: 100%;
   width: 100%;
-  overflow: hidden;
+}
+
+/* Desktop: no scroll (original behaviour) */
+@media (min-width: 768px) {
+  html, body, #root {
+    overflow: hidden;
+  }
+}
+
+/* Mobile: allow scroll, prevent horizontal overflow */
+@media (max-width: 767px) {
+  html, body {
+    overflow-x: hidden;
+    overflow-y: auto;
+    height: 100%;
+    height: -webkit-fill-available;
+  }
+  #root {
+    min-height: 100%;
+    min-height: -webkit-fill-available;
+    overflow-x: hidden;
+  }
 }
 
 body {
@@ -35,6 +61,8 @@ body {
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Prevent tap highlight on mobile */
+  -webkit-tap-highlight-color: transparent;
 }
 
 ::-webkit-scrollbar {
@@ -57,4 +85,14 @@ body {
 }
 .scrollbar-none {
   scrollbar-width: none;
+}
+
+/* Safe area utilities */
+.pb-safe { padding-bottom: max(1rem, var(--sab)); }
+.pt-safe { padding-top: max(0px, var(--sat)); }
+.mb-safe { margin-bottom: var(--sab); }
+
+/* Mobile bottom-nav clearance */
+.mobile-content-pb {
+  padding-bottom: calc(64px + var(--sab));
 }
