@@ -156,6 +156,16 @@ const TIMELINE_SOON_REGEX = /\b(this week|tomorrow|couple of days|few days|this 
 const TIMELINE_MONTH_REGEX = /\b(this month|next week|soon|shortly)\b/i;
 const TIMELINE_LATER_REGEX = /\b(next month|later|not sure yet|no rush|no hurry|still thinking|still deciding|not decided)\b/i;
 
+// Renewal-date regexes — separate from appointment_datetime so the two fields never collide.
+// Matches relative dates, named days, "DD/MM", and "15th August"-style literals.
+const RENEWAL_DATE_REGEX_NAMED_DAY = /\b(?:this\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+const RENEWAL_DATE_REGEX_RELATIVE = /\b(today|tomorrow|next\s+(?:week|month|year)|this\s+(?:month|week|year)|end\s+of\s+(?:the\s+)?(?:month|year))\b/i;
+const RENEWAL_DATE_REGEX_DMY = /\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/;
+const RENEWAL_DATE_REGEX_LITERAL = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{2,4})?\b/i;
+
+// Explicit user decline at RECOMMENDATION / APPOINTMENT stage
+const DECLINE_REGEX = /^(no|nah|not interested|no thanks|nope|not now|maybe later|abhi nahi|nahi|don't want|dont want)\b/i;
+
 function extractBuyingTimeline(text) {
   if (!text) return null;
   const dayMatch = text.match(TIMELINE_DAY_REGEX);
@@ -168,6 +178,84 @@ function extractBuyingTimeline(text) {
   if (TIMELINE_MONTH_REGEX.test(text)) return "This month";
   if (TIMELINE_LATER_REGEX.test(text)) return "Not urgent";
   return null;
+}
+
+/**
+ * extractRenewalDate: parse free-form date text into a canonical renewal date string.
+ * Returns null if nothing date-like is found.
+ * Kept intentionally separate from extractBuyingTimeline / appointment_datetime
+ * so those two fields never clobber each other.
+ */
+function extractRenewalDate(text) {
+  if (!text) return null;
+  const literalMatch = text.match(RENEWAL_DATE_REGEX_LITERAL);
+  if (literalMatch) return literalMatch[0];
+  const dmyMatch = text.match(RENEWAL_DATE_REGEX_DMY);
+  if (dmyMatch) return dmyMatch[0];
+  const relativeMatch = text.match(RENEWAL_DATE_REGEX_RELATIVE);
+  if (relativeMatch) return relativeMatch[0];
+  const dayMatch = text.match(RENEWAL_DATE_REGEX_NAMED_DAY);
+  if (dayMatch) {
+    const d = dayMatch[1];
+    return `This ${d.charAt(0).toUpperCase()}${d.slice(1).toLowerCase()}`;
+  }
+  return null;
+}
+
+/**
+ * fillPendingField — intent-aware pending-field capture (Fix #2).
+ *
+ * Runs AFTER all specific regex extractors inside runLocalExtraction() and fills
+ * the ONE field the bot is currently waiting for, but only if:
+ *   1. That field belongs to the ACTIVE intent's required list.
+ *   2. No other extractor already produced a value for it this turn.
+ *   3. The utterance is not a generic filler / negation that should NOT be
+ *      stored as a real value (bare "no", single digit, "hospital", etc.).
+ *
+ * Currently handles:
+ *   - hospital_name  (CLAIMS intent)
+ *   - renewal_date   (RENEWAL intent)
+ *
+ * @param {object} conversation  Live conversation object with .intent and .missingFields
+ * @param {string} text          Raw (sanitised) speech text for this turn
+ * @param {object} extracted     Already-extracted fields object (mutated in place)
+ */
+function fillPendingField(conversation, text, extracted) {
+  const intentRequires = INTENT_REQUIRED_FIELDS[conversation.intent] || [];
+  const missing = conversation.missingFields || [];
+
+  // ── hospital_name (CLAIMS) ───────────────────────────────────────────────
+  if (
+    conversation.intent === INTENTS.CLAIMS &&
+    intentRequires.includes("hospital_name") &&
+    missing.includes("hospital_name") &&
+    !extracted.hospital_name
+  ) {
+    const trimmed = text.trim();
+    // Reject bare fillers: single words that are only filler/negation keywords,
+    // bare digits, or utterances that contain ONLY the word "hospital".
+    const isGenericFiller = /^(no|none|not\s+sure|na|nahi|nothing|\d+)$/i.test(trimmed);
+    const isKeywordOnly = /^(hospital|hospitals|cashless|network|claim|claims)$/i.test(trimmed);
+    if (!isGenericFiller && !isKeywordOnly && trimmed.length > 2) {
+      // Title-case the captured value for display consistency
+      extracted.hospital_name = trimmed.replace(/\w\S*/g, (w) =>
+        w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+      );
+    }
+  }
+
+  // ── renewal_date (RENEWAL) ───────────────────────────────────────────────
+  if (
+    conversation.intent === INTENTS.RENEWAL &&
+    intentRequires.includes("renewal_date") &&
+    missing.includes("renewal_date") &&
+    !extracted.renewal_date
+  ) {
+    const parsed = extractRenewalDate(text);
+    if (parsed) {
+      extracted.renewal_date = parsed;
+    }
+  }
 }
 
 class PerformanceTracker {
@@ -349,18 +437,26 @@ function runLocalExtraction(speech, conversation) {
   };
 
   // 1. Intent Detection
+  // NOTE: DTMF digits are always treated as intent selection and ARE allowed
+  // to overwrite the active intent (user is pressing a menu key deliberately).
+  // Keyword-based detection is restricted — see processTurn() guard (Fix #1).
   if (/^[1-9]$/.test(text)) {
     const digit = text;
     if (DTMF_INTENT_MAP[digit]) {
       result.detectedIntent = DTMF_INTENT_MAP[digit];
     }
   } else {
-    // Check keywords
+    // Check keywords — these are CANDIDATES only. processTurn() decides whether
+    // to apply the detected intent based on the current conversation state.
     if (/\b(renew|renewal|expire|expiring)\b/i.test(text)) {
       result.detectedIntent = INTENTS.RENEWAL;
     } else if (/\b(claim|claims|bills|reimburse|reimbursement)\b/i.test(text)) {
       result.detectedIntent = INTENTS.CLAIMS;
     } else if (/\b(hospital|hospitals|cashless|network)\b/i.test(text)) {
+      // ⚠️  "hospital" keyword alone does NOT override an active CLAIMS intent
+      // because mid-claim the customer names the treating hospital. Guard in
+      // processTurn() handles this — we still surface the candidate for
+      // WELCOME / INTENT_SELECTION stages.
       result.detectedIntent = INTENTS.CASHLESS_HOSPITAL;
     } else if (/\b(advisor|agent|representative|human|talk to|connect me|speak to)\b/i.test(text)) {
       result.detectedIntent = INTENTS.TALK_TO_ADVISOR;
@@ -484,6 +580,13 @@ function runLocalExtraction(speech, conversation) {
     }
   }
 
+  // 9. Pending-field capture (Fix #2): fills hospital_name and renewal_date
+  // based on the single field the conversation is currently waiting on.
+  // Runs AFTER all regex extractors so it only fires when they produced nothing.
+  if (conversation) {
+    fillPendingField(conversation, text, result.extractedFields);
+  }
+
   return result;
 }
 
@@ -492,7 +595,13 @@ function hasUsefulLocalInfo(localExtracted) {
     return true;
   }
   const fields = localExtracted.extractedFields || {};
-  const strongFields = ["age", "budget", "city", "family_members", "policy_number", "buying_timeline", "medical_history", "appointment_datetime"];
+  // Fix #3: include hospital_name and renewal_date so that fillPendingField()
+  // results count as "useful" and skip the AI fallback path.
+  const strongFields = [
+    "age", "budget", "city", "family_members", "policy_number",
+    "buying_timeline", "medical_history", "appointment_datetime",
+    "hospital_name", "renewal_date"
+  ];
   return strongFields.some(f => fields[f] !== null && fields[f] !== undefined && fields[f] !== "");
 }
 
@@ -915,6 +1024,16 @@ function computeNextStage(conversation, aiResult, speechResult) {
   if (aiResult.wantsHuman) return STAGES.HUMAN_TRANSFER;
   if (EXPLICIT_END_REGEX.test(speechResult)) return STAGES.CLOSING;
 
+  // Fix #6: explicit decline at RECOMMENDATION / APPOINTMENT → close gracefully
+  // rather than loop back to the plan pitch or keep asking for appointment time.
+  const speechLower = (speechResult || "").toLowerCase().trim();
+  if (
+    (stage === STAGES.RECOMMENDATION || stage === STAGES.APPOINTMENT) &&
+    DECLINE_REGEX.test(speechLower)
+  ) {
+    return STAGES.CLOSING;
+  }
+
   if (direction === CALL_DIRECTION.OUTBOUND) {
     switch (stage) {
       case STAGES.GREETING:
@@ -927,11 +1046,16 @@ function computeNextStage(conversation, aiResult, speechResult) {
       case STAGES.PROFILING:
         return missingFields.length === 0 ? STAGES.RECOMMENDATION : STAGES.PROFILING;
       case STAGES.RECOMMENDATION:
-        return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
+        // Fix #5: check appointment_datetime FIRST so the "yes" that books the
+        // appointment immediately closes on the same turn instead of one turn late.
+        if (aiResult.extractedFields && aiResult.extractedFields.appointment_datetime) return STAGES.CLOSING;
+        if (aiResult.objectionType) return STAGES.OBJECTION_HANDLING;
+        return STAGES.APPOINTMENT;
       case STAGES.OBJECTION_HANDLING:
         if (objectionCount + (aiResult.objectionType ? 1 : 0) >= CONFIG.MAX_OBJECTIONS) return STAGES.CLOSING;
         return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
       case STAGES.APPOINTMENT:
+        // Fix #5: same fast-path for the APPOINTMENT stage itself.
         return aiResult.extractedFields && aiResult.extractedFields.appointment_datetime ? STAGES.CLOSING : STAGES.APPOINTMENT;
       case STAGES.CLOSING:
         return STAGES.ENDED;
@@ -955,6 +1079,8 @@ function computeNextStage(conversation, aiResult, speechResult) {
       return STAGES.RECOMMENDATION;
 
     case STAGES.RECOMMENDATION:
+      // Fix #5: appointment_datetime present → skip APPOINTMENT stage, close immediately.
+      if (aiResult.extractedFields && aiResult.extractedFields.appointment_datetime) return STAGES.CLOSING;
       if (aiResult.objectionType) return STAGES.OBJECTION_HANDLING;
       return STAGES.APPOINTMENT;
 
@@ -963,6 +1089,7 @@ function computeNextStage(conversation, aiResult, speechResult) {
       return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
 
     case STAGES.APPOINTMENT:
+      // Fix #5: same fast-path.
       return aiResult.extractedFields && aiResult.extractedFields.appointment_datetime ? STAGES.CLOSING : STAGES.APPOINTMENT;
 
     // Task-complete-and-close branches (Problem 7): renewal, claims, and
@@ -1640,11 +1767,30 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   let replyText = "";
 
   const localExtracted = runLocalExtraction(speechResult, conversation);
-  
-  // ALWAYS merge locally extracted intent and fields first
+
+  // Fix #1: Guard intent re-detection.
+  // Only allow keyword-based intent detection to overwrite conversation.intent when:
+  //   a) intent is currently UNKNOWN (no task has started), OR
+  //   b) stage is WELCOME / INTENT_SELECTION (user is still choosing from menu).
+  //
+  // Once a real task is active (CLAIMS, RENEWAL, BUY_POLICY, HOSPITAL, etc.)
+  // we treat every utterance as an answer to the current pending field —
+  // NOT as the start of a new intent. Without this guard, answering
+  // "Which hospital?" → "Government Hospital Sector 32" would match the
+  // \bhospital\b keyword and incorrectly switch intent to CASHLESS_HOSPITAL.
+  const isIntentSelectionPhase =
+    conversation.intent === INTENTS.UNKNOWN ||
+    conversation.stage === STAGES.WELCOME ||
+    conversation.stage === STAGES.INTENT_SELECTION;
+
   if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
-    conversation.intent = localExtracted.detectedIntent;
+    if (isIntentSelectionPhase) {
+      // Safe to overwrite — no task is active yet.
+      conversation.intent = localExtracted.detectedIntent;
+    }
+    // else: silently discard the keyword-detected candidate; the active task wins.
   }
+
   for (const [key, value] of Object.entries(localExtracted.extractedFields)) {
     if (value !== null && value !== undefined && value !== "") {
       conversation.customer[key] = value;
@@ -1778,6 +1924,23 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     } catch (e) {
       log.error("D1 customer update error", { error: e.message });
     }
+  }
+
+  // Fix #4: Repeat-question breaker.
+  // Track how many consecutive turns Asha has asked the SAME question.
+  // On the 3rd identical question in a row, transfer to human instead of looping.
+  if (conversation.lastQuestion && replyText === conversation.lastQuestion) {
+    conversation.repeatCount = (conversation.repeatCount || 0) + 1;
+  } else {
+    conversation.repeatCount = 0;
+  }
+
+  if (conversation.repeatCount >= 2) {
+    // Bot has been stuck on the same question 3 times — hand off gracefully.
+    replyText = "I want to make sure this gets sorted properly — let me connect you with a specialist who can help directly.";
+    conversation.stage = STAGES.HUMAN_TRANSFER;
+    conversation.transferredToHuman = true;
+    conversation.repeatCount = 0;
   }
 
   conversation.history.push({ role: "asha", text: replyText });
