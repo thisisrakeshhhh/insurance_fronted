@@ -97,6 +97,13 @@ export async function endSession(sessionId: string) {
   })
 }
 
+export async function clearSessionProfile(sessionId: string) {
+  return workerFetch<{ ok: boolean; customer: Record<string, any>; missingFields: string[] }>('/api/session/clear', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId }),
+  })
+}
+
 export async function fetchCustomer(phone: string) {
   return workerFetch<Record<string, unknown>>(`/api/customer/${encodeURIComponent(phone)}`)
 }

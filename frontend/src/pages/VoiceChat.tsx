@@ -13,7 +13,7 @@ import { PhoneOff, User, Info, Phone, Mic, PhoneCall, Sparkles } from 'lucide-re
 import { toast } from 'sonner'
 
 export function VoiceChat() {
-  const { startSession, stopSession, startManualListening, sendTurn, triggerPhoneCall } = useVoiceSession()
+  const { startSession, stopSession, startManualListening, sendTurn, triggerPhoneCall, clearCustomerProfile } = useVoiceSession()
   const { status, messages, currentCustomer, currentStage, currentModel, lastLatencyMs, sessionStartTime, lastTurn, sessionId } = useVoiceStore()
   const { devPhone } = useSettingsStore()
   
@@ -155,9 +155,19 @@ export function VoiceChat() {
 
         {/* Customer Details Panel */}
         <div className="px-4 py-4 border-b border-border">
-          <div className="flex items-center gap-2 mb-3">
-            <User size={15} className="text-accent" />
-            <span className="text-sm font-semibold text-text-primary">Customer Details</span>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <User size={15} className="text-accent" />
+              <span className="text-sm font-semibold text-text-primary">Customer Details</span>
+            </div>
+            {hasSession && (
+              <button
+                onClick={clearCustomerProfile}
+                className="text-[10px] bg-accent/10 hover:bg-accent/20 text-accent font-bold px-2 py-0.5 rounded transition-all cursor-pointer border border-accent/20"
+              >
+                Clear Profile
+              </button>
+            )}
           </div>
           {currentCustomer ? (
             <div className="flex flex-col gap-2 text-xs">
@@ -169,12 +179,12 @@ export function VoiceChat() {
                 ['Budget', currentCustomer.budget],
                 ['Coverage', currentCustomer.coverage_needed],
                 ['Insurer', currentCustomer.existing_insurer],
-              ].map(([k, v]) => v ? (
+              ].map(([k, v]) => (
                 <div key={String(k)} className="flex justify-between gap-2 py-0.5 border-b border-border/30 last:border-0">
                   <span className="text-text-muted">{String(k)}</span>
-                  <span className="text-text-primary font-medium text-right">{String(v)}</span>
+                  <span className="text-text-primary font-medium text-right">{v ? String(v) : '-'}</span>
                 </div>
-              ) : null)}
+              ))}
             </div>
           ) : (
             <p className="text-xs text-text-muted">Start a session or call to view customer data.</p>

@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 import { toast } from 'sonner'
-import { startBrowserSession, sendBrowserTurn, makeTestCall } from '@/api/worker'
+import { startBrowserSession, sendBrowserTurn, makeTestCall, clearSessionProfile } from '@/api/worker'
 import { useVoiceStore, useSettingsStore } from '@/store'
 import { useSpeech } from './useSpeech'
 import type { Message } from '@/types'
@@ -222,6 +222,21 @@ export function useVoiceSession() {
     }
   }, [store, addMsg])
 
+  const clearCustomerProfile = useCallback(async () => {
+    const sid = useVoiceStore.getState().sessionId
+    if (!sid) return
+    try {
+      const res = await clearSessionProfile(sid)
+      if (res.ok) {
+        store.setCurrentCustomer(res.customer)
+        toast.success('Customer profile cleared!')
+        addMsg('system', 'Customer profile has been cleared.')
+      }
+    } catch (err) {
+      toast.error('Failed to clear profile: ' + (err instanceof Error ? err.message : String(err)))
+    }
+  }, [store, addMsg])
+
   return {
     startSession,
     stopSession,
@@ -229,6 +244,7 @@ export function useVoiceSession() {
     startManualListening,
     toggleMute,
     triggerPhoneCall,
+    clearCustomerProfile,
     isStarting: startingRef.current,
   }
 }

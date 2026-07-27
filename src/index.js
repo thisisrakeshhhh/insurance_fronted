@@ -1315,6 +1315,17 @@ async function dbGetOrCreateCustomer(db, phone, tracker) {
   return tracker ? tracker.measureAsync("customerLookupMs", exec) : exec();
 }
 
+async function dbResetCustomer(db, phone) {
+  if (!db) return;
+  await db.prepare(`
+    UPDATE customers 
+    SET name = NULL, email = NULL, age = NULL, city = NULL, pincode = NULL, 
+        family_members = NULL, existing_insurer = NULL, renewal_date = NULL, 
+        medical_history = NULL, coverage_needed = NULL, budget = NULL, buying_timeline = NULL 
+    WHERE phone = ?
+  `).bind(phone).run();
+}
+
 async function dbUpdateCustomer(db, phone, customerData, tracker) {
   const allFields = {
     name: customerData.name || null,
@@ -2204,6 +2215,35 @@ async function handleApiSessionEnd(request, env, tracker) {
   return jsonResponse({ ok: true, sessionId, stage: STAGES.ENDED }, 200, reqOrigin, tracker);
 }
 
+async function handleApiSessionClear(request, env, tracker) {
+  const reqOrigin = request.headers.get("Origin") || "*";
+  let body = {};
+  try {
+    body = await tracker.measureAsync("requestParsingMs", () => request.json());
+  } catch {}
+  const { sessionId } = body;
+  if (!sessionId) return jsonResponse({ error: "sessionId required" }, 400, reqOrigin, tracker);
+  
+  if (env.DB) {
+    try {
+      const row = await env.DB.prepare("SELECT session_data, phone FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      if (row) {
+        let session = JSON.parse(row.session_data || "{}");
+        await dbResetCustomer(env.DB, row.phone);
+        session.customer = { phone: row.phone };
+        session.missingFields = getMissingFields(session.customer, session.intent);
+        session.quote = null;
+        await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(session), sessionId).run();
+        
+        return jsonResponse({ ok: true, customer: session.customer, missingFields: session.missingFields }, 200, reqOrigin, tracker);
+      }
+    } catch (e) {
+      log.error("Session clear error", { error: e.message });
+    }
+  }
+  return jsonResponse({ error: "Session or DB not found" }, 404, reqOrigin, tracker);
+}
+
 async function handleApiCustomerGet(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const url = new URL(request.url);
@@ -2428,6 +2468,7 @@ async function handleBrowserSession(request, env, ctx, tracker) {
   let customer = { phone };
   if (env.DB) {
     try {
+      await dbResetCustomer(env.DB, phone);
       customer = await dbGetOrCreateCustomer(env.DB, phone, tracker);
     } catch {}
   }
@@ -2809,6 +2850,7 @@ export default {
       if (url.pathname === "/api/status" && method === "GET") return await handleApiStatus(request, env, tracker);
       if (url.pathname === "/api/config" && method === "GET") return handleApiConfig(request, env, tracker);
       if (url.pathname === "/api/session/end" && method === "POST") return await handleApiSessionEnd(request, env, tracker);
+      if (url.pathname === "/api/session/clear" && method === "POST") return await handleApiSessionClear(request, env, tracker);
       if (url.pathname.startsWith("/api/session/") && method === "GET") return await handleApiSessionGet(request, env, tracker);
       if (url.pathname.startsWith("/api/customer/") && method === "GET") return await handleApiCustomerGet(request, env, tracker);
       if (url.pathname.startsWith("/api/history/") && method === "GET") return await handleApiHistory(request, env, tracker);
