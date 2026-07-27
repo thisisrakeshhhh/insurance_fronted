@@ -429,6 +429,8 @@ function runLocalExtraction(speech, conversation) {
     } else {
       result.extractedFields.family_members = 3;
     }
+  } else if (/\b(myself|only me|me|individual|single|just me|self)\b/i.test(text)) {
+    result.extractedFields.family_members = 1;
   }
 
   // 6. City Extraction
