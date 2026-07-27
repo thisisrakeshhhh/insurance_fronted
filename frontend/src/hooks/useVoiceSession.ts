@@ -146,6 +146,9 @@ export function useVoiceSession() {
   const sendTurn = useCallback(async (text: string) => {
     const sid = useVoiceStore.getState().sessionId
     if (!sid) return
+    listeningRef.current = false
+    speech.stopListening()
+    speech.stopSpeaking()
     addMsg('customer', text)
     store.setStatus('thinking')
     try {
