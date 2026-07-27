@@ -335,9 +335,7 @@ function runLocalExtraction(speech, conversation) {
     }
   } else {
     // Check keywords
-    if (/\b(buy|purchase|new policy|get policy|get cover|need policy|want policy)\b/i.test(text)) {
-      result.detectedIntent = INTENTS.BUY_POLICY;
-    } else if (/\b(renew|renewal|expire|expiring)\b/i.test(text)) {
+    if (/\b(renew|renewal|expire|expiring)\b/i.test(text)) {
       result.detectedIntent = INTENTS.RENEWAL;
     } else if (/\b(claim|claims|bills|reimburse|reimbursement)\b/i.test(text)) {
       result.detectedIntent = INTENTS.CLAIMS;
@@ -347,6 +345,8 @@ function runLocalExtraction(speech, conversation) {
       result.detectedIntent = INTENTS.TALK_TO_ADVISOR;
     } else if (/\b(complaint|complain|grievance|issue|dissatisfied|wrong charge|bad service)\b/i.test(text)) {
       result.detectedIntent = INTENTS.COMPLAINT;
+    } else if (/\b(buy|purchase|new|policy|insurance|cover|plan|get|need|want)\b/i.test(text)) {
+      result.detectedIntent = INTENTS.BUY_POLICY;
     }
   }
 
