@@ -10,6 +10,7 @@ import { useVoiceSession } from '@/hooks/useVoiceSession'
 import { useVoiceStore, useSettingsStore } from '@/store'
 import { stageColor } from '@/utils/format'
 import { PhoneOff, User, Info, Phone, Mic, PhoneCall, Sparkles } from 'lucide-react'
+import { toast } from 'sonner'
 
 export function VoiceChat() {
   const { startSession, stopSession, startManualListening, sendTurn, triggerPhoneCall } = useVoiceSession()
@@ -21,6 +22,22 @@ export function VoiceChat() {
   const [liveTranscript] = useState('')
 
   const hasSession = !!sessionId && status !== 'ended'
+
+  const handleTestPreset = async (text: string) => {
+    if (!hasSession) {
+      try {
+        toast.info('Starting Web Voice Session first...')
+        await startSession('outbound', '+918567890273')
+        setTimeout(async () => {
+          await sendTurn(text)
+        }, 1200)
+      } catch (err) {
+        toast.error('Failed to start session for test preset')
+      }
+    } else {
+      await sendTurn(text)
+    }
+  }
 
   const handleStart = () => {
     if (!hasSession) {
@@ -162,6 +179,33 @@ export function VoiceChat() {
           ) : (
             <p className="text-xs text-text-muted">Start a session or call to view customer data.</p>
           )}
+        </div>
+
+        {/* Test Presets Panel */}
+        <div className="px-4 py-4 border-b border-border bg-bg-card/40">
+          <div className="flex items-center gap-2 mb-3">
+            <Sparkles size={15} className="text-accent animate-pulse" />
+            <span className="text-sm font-semibold text-text-primary">Hybrid Test Presets</span>
+          </div>
+          <div className="flex flex-col gap-2">
+            {[
+              { label: 'Case 1: Buy Policy (Local)', text: 'I want to buy a policy' },
+              { label: 'Case 2: Short Age (Local)', text: 'my age is 21' },
+              { label: 'Case 3: Complex Info (Local)', text: 'yes i am looking for to buy a policy for my age is 21 and i have 20k of budget which cover my family' },
+              { label: 'Case 4: Mixed Hindi (Gemini)', text: 'mera age 21 hai aur family ke liye 20 hazar ka policy chahiye no disease' },
+              { label: 'Case 5: DTMF "1" (Local)', text: '1' },
+              { label: 'Case 6: Multi-field (Local)', text: 'I am 34 from Pune, family of 4, budget 20k, no disease' }
+            ].map((preset, idx) => (
+              <button
+                key={preset.label}
+                onClick={() => handleTestPreset(preset.text)}
+                className="w-full text-left p-2 rounded-xl bg-bg-surface hover:bg-accent/10 border border-border hover:border-accent/30 transition-all text-xs text-text-muted hover:text-text-primary flex flex-col gap-0.5 cursor-pointer"
+              >
+                <span className="font-bold text-accent text-[10px]">{preset.label}</span>
+                <span className="truncate italic">"{preset.text}"</span>
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Session Status Panel */}

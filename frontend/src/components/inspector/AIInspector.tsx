@@ -46,7 +46,47 @@ export function AIInspector({ lastTurn }: Props) {
       <div className="flex items-center justify-between text-xs">
         <div className="flex items-center gap-1.5 text-text-muted">
           <Zap size={11} />
-          Latency
+          Handled By
+        </div>
+        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+          lastTurn.handledBy === 'local_rules'
+            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+            : 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
+        }`}>
+          {lastTurn.handledBy === 'local_rules' ? 'Local Rules' : 'Gemini AI'}
+        </span>
+      </div>
+
+      {lastTurn.handledBy === 'gemini' && lastTurn.fallbackReason && (
+        <div className="text-[11px] p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 leading-normal">
+          <span className="font-semibold block mb-0.5">Fallback Reason:</span>
+          {lastTurn.fallbackReason}
+        </div>
+      )}
+
+      {lastTurn.usedAI && (
+        <>
+          <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center gap-1.5 text-text-muted">
+              <Brain size={11} />
+              AI Provider
+            </div>
+            <span className="text-text-primary capitalize font-medium">{lastTurn.aiProvider}</span>
+          </div>
+          <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center gap-1.5 text-text-muted">
+              <Zap size={11} />
+              AI Latency
+            </div>
+            <span className="text-accent font-mono">{formatMs(lastTurn.aiLatencyMs || 0)}</span>
+          </div>
+        </>
+      )}
+
+      <div className="flex items-center justify-between text-xs">
+        <div className="flex items-center gap-1.5 text-text-muted">
+          <Zap size={11} />
+          Total Latency
         </div>
         <span className="text-accent font-mono">{formatMs(lastTurn.latencyMs)}</span>
       </div>
@@ -59,11 +99,45 @@ export function AIInspector({ lastTurn }: Props) {
         <span className="text-text-muted font-mono text-xs truncate max-w-[120px]">{lastTurn.model}</span>
       </div>
 
+      {/* Local Extracted Fields */}
+      {lastTurn.extractedByLocal && Object.keys(lastTurn.extractedByLocal).length > 0 && (
+        <div className="flex flex-col gap-1.5 p-2.5 rounded-xl bg-emerald-500/5 border border-emerald-500/10">
+          <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider">
+            Extracted By Local Rules
+          </div>
+          <div className="flex flex-col gap-1">
+            {Object.entries(lastTurn.extractedByLocal).map(([k, v]) => (
+              <div key={k} className="flex justify-between text-xs">
+                <span className="text-text-muted capitalize">{k.replace(/_/g, ' ')}</span>
+                <span className="text-emerald-300 font-medium">{String(v)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Gemini Extracted Fields */}
+      {lastTurn.extractedByGemini && Object.keys(lastTurn.extractedByGemini).length > 0 && (
+        <div className="flex flex-col gap-1.5 p-2.5 rounded-xl bg-indigo-500/5 border border-indigo-500/10">
+          <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">
+            Extracted By Gemini AI
+          </div>
+          <div className="flex flex-col gap-1">
+            {Object.entries(lastTurn.extractedByGemini).map(([k, v]) => (
+              <div key={k} className="flex justify-between text-xs">
+                <span className="text-text-muted capitalize">{k.replace(/_/g, ' ')}</span>
+                <span className="text-indigo-300 font-medium">{String(v)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {fields.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-1.5 text-text-muted text-xs font-medium uppercase tracking-wider">
             <User size={11} />
-            Extracted Fields
+            Cumulative Profile
           </div>
           <div className="flex flex-col gap-1.5">
             {fields.map(([key, val]) => (

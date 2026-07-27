@@ -48,6 +48,13 @@ export interface TurnResponse {
   turnCount: number
   latencyMs: number
   model: string
+  handledBy?: 'local_rules' | 'gemini'
+  usedAI?: boolean
+  aiProvider?: 'none' | 'gemini' | 'openai'
+  aiLatencyMs?: number
+  fallbackReason?: string | null
+  extractedByLocal?: Partial<Customer>
+  extractedByGemini?: Partial<Customer>
 }
 
 export interface Message {

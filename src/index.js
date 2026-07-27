@@ -312,6 +312,224 @@ function extractFastPathFields(speech) {
   return fields;
 }
 
+function isHinglishOrMixed(speech) {
+  const text = (speech || "").toLowerCase().trim();
+  const hinglishRegex = /\b(mera|meri|mujhe|hai|aur|ke\s+liye|liye|chahiye|chahata|chahati|ka|ko|se|ho|gaya|rha|rhi|hain|nhi|nahi|ki|sath|tha|thi|the|hazar|hazoor|hazara|paise|kharcha|bimar|bimari|ilaj)\b/i;
+  return hinglishRegex.test(text);
+}
+
+function runLocalExtraction(speech, conversation) {
+  const text = (speech || "").trim();
+  const lower = text.toLowerCase();
+  
+  const result = {
+    detectedIntent: null,
+    extractedFields: {}
+  };
+
+  // 1. Intent Detection
+  if (/^[1-9]$/.test(text)) {
+    const digit = text;
+    if (DTMF_INTENT_MAP[digit]) {
+      result.detectedIntent = DTMF_INTENT_MAP[digit];
+    }
+  } else {
+    // Check keywords
+    if (/\b(buy|purchase|new policy|get policy|get cover|need policy|want policy)\b/i.test(text)) {
+      result.detectedIntent = INTENTS.BUY_POLICY;
+    } else if (/\b(renew|renewal|expire|expiring)\b/i.test(text)) {
+      result.detectedIntent = INTENTS.RENEWAL;
+    } else if (/\b(claim|claims|bills|reimburse|reimbursement)\b/i.test(text)) {
+      result.detectedIntent = INTENTS.CLAIMS;
+    } else if (/\b(hospital|hospitals|cashless|network)\b/i.test(text)) {
+      result.detectedIntent = INTENTS.CASHLESS_HOSPITAL;
+    } else if (/\b(advisor|agent|representative|human|talk to|connect me|speak to)\b/i.test(text)) {
+      result.detectedIntent = INTENTS.TALK_TO_ADVISOR;
+    } else if (/\b(complaint|complain|grievance|issue|dissatisfied|wrong charge|bad service)\b/i.test(text)) {
+      result.detectedIntent = INTENTS.COMPLAINT;
+    }
+  }
+
+  // 2. Policy Number Extraction
+  const explicitPolicy = text.match(POLICY_NUMBER_REGEX);
+  if (explicitPolicy) {
+    result.extractedFields.policy_number = explicitPolicy[1];
+  } else if (/polic/i.test(text)) {
+    const bare = text.match(BARE_LONG_NUMBER_REGEX);
+    if (bare) result.extractedFields.policy_number = bare[1];
+  } else {
+    const bare = text.match(/\b(\d{5,12})\b/);
+    if (bare) result.extractedFields.policy_number = bare[1];
+  }
+
+  // 3. Budget Extraction
+  const budgetMatch = text.match(/\b(\d+)\s*(?:k|thousand|lakhs?|lakh|hazoo?r|hazar)?\s*(?:of\s*)?budget\b/i) || 
+                      text.match(/\b(\d+)\s*(k|thousand|lakhs?|lakh|hazoo?r|hazar)\b/i) ||
+                      text.match(/\bbudget\D{0,10}?(\d+(?:\s*(?:k|thousand|lakhs?|lakh|hazoo?r|hazar))?)\b/i) ||
+                      text.match(/\b(\d{4,6})\b/);
+  if (budgetMatch) {
+    result.extractedFields.budget = budgetMatch[0].trim();
+  }
+
+  // Strip budget pattern before doing age check, to avoid extracting age from e.g. "20" of "20k"
+  let textForAge = text;
+  if (budgetMatch) {
+    textForAge = text.replace(budgetMatch[0], "");
+  }
+
+  // 4. Age Extraction
+  const ageMatch = textForAge.match(/\b(?:age\D{0,10}?|i\s+am\s+|aged\s+)?([1-8][0-9])\s*(?:years?|yrs|yr|year\s+old)?\b/i);
+  if (ageMatch) {
+    const val = parseInt(ageMatch[1], 10);
+    if (val >= 18 && val <= 80) {
+      result.extractedFields.age = val;
+    }
+  } else {
+    const bareNumbers = textForAge.match(/\b([1-8][0-9])\b/g);
+    if (bareNumbers) {
+      for (const numStr of bareNumbers) {
+        const val = parseInt(numStr, 10);
+        if (val >= 18 && val <= 80) {
+          result.extractedFields.age = val;
+          break;
+        }
+      }
+    }
+  }
+
+  // 5. Family Members Extraction
+  const familyNumMatch = text.match(/\b(?:family\s+of\s+)?([2-9])\s*(?:members?|people|persons)?\b/i) ||
+                         text.match(/\b([2-9])\s*(?:family\s+members?|members?)\b/i);
+  if (familyNumMatch) {
+    result.extractedFields.family_members = parseInt(familyNumMatch[1], 10);
+  } else if (/\b(cover my family|my family|our family)\b/i.test(text)) {
+    result.extractedFields.family_members = 3;
+  } else if (/\b(wife|husband|spouse)\b/i.test(text)) {
+    result.extractedFields.family_members = 2;
+  } else if (/\b(kids|children|daughter|son)\b/i.test(text)) {
+    result.extractedFields.family_members = 3;
+  }
+
+  // 6. City Extraction
+  const CITIES = [
+    "mumbai", "delhi", "bangalore", "bengaluru", "pune", "chennai", "hyderabad", "kolkata",
+    "ahmedabad", "jaipur", "surat", "lucknow", "kanpur", "nagpur", "indore", "thane", "bhopal",
+    "visakhapatnam", "patna", "vadodara", "ghaziabad", "ludhiana", "agra", "nashik", "faridabad",
+    "meerut", "rajkot", "varanasi", "srinagar", "amritsar", "navi mumbai", "ranchi", "coimbatore",
+    "gwalior", "vijayawada", "jodhpur", "raipur", "guwahati", "chandigarh"
+  ];
+  const cityRegex = new RegExp('\\b(' + CITIES.join('|') + ')\\b', 'i');
+  const cityMatch = text.match(cityRegex);
+  if (cityMatch) {
+    const city = cityMatch[1];
+    result.extractedFields.city = city.charAt(0).toUpperCase() + city.slice(1).toLowerCase();
+  }
+
+  // 7. Medical History Extraction
+  if (/\b(no disease|no history|no illness|none|nil|nothing|no health issue|no medical history|no issues|healthy)\b/i.test(text)) {
+    result.extractedFields.medical_history = "None";
+  } else {
+    const conditions = ["diabetes", "bp", "blood pressure", "hypertension", "asthma", "thyroid", "heart", "cancer", "diabetic"];
+    const found = [];
+    for (const cond of conditions) {
+      if (lower.includes(cond)) {
+        found.push(cond);
+      }
+    }
+    if (found.length > 0) {
+      result.extractedFields.medical_history = found.join(", ");
+    }
+  }
+
+  return result;
+}
+
+function hasUsefulLocalInfo(localExtracted) {
+  if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
+    return true;
+  }
+  const fields = localExtracted.extractedFields || {};
+  const strongFields = ["age", "budget", "city", "family_members", "policy_number"];
+  return strongFields.some(f => fields[f] !== null && fields[f] !== undefined && fields[f] !== "");
+}
+
+function generateLocalResponse(conversation) {
+  const intent = conversation.intent || INTENTS.UNKNOWN;
+  const missing = conversation.missingFields || [];
+
+  if (intent === INTENTS.UNKNOWN) {
+    return "Thank you for calling TATA AIG Health Insurance. I can help you buy a new policy, renew your current policy, file a claim, or find a network hospital. What would you like to do today?";
+  }
+
+  if (intent === INTENTS.BUY_POLICY) {
+    if (missing.includes("age")) {
+      return "Great! Let's find the right health plan for you. Could you tell me your age?";
+    }
+    if (missing.includes("city")) {
+      return "Got it. Which city do you live in?";
+    }
+    if (missing.includes("family_members")) {
+      return "Understood. Who would you like to cover in this policy? Yourself, or your family members too?";
+    }
+    if (missing.includes("medical_history")) {
+      return "And do you have any pre-existing medical conditions, or is there no medical history?";
+    }
+    if (missing.includes("budget")) {
+      return "What is your approximate annual budget for the premium?";
+    }
+    if (missing.includes("buying_timeline")) {
+      return "When are you planning to purchase this policy?";
+    }
+
+    if (conversation.quote) {
+      return `Based on your profile, I recommend the ${conversation.quote.planName} which provides ${conversation.quote.coverage} coverage for about ${conversation.quote.premiumRange}. Would you like to schedule an appointment with a health advisor to proceed?`;
+    }
+    return "Thank you for providing the details. I will connect you with a health advisor shortly to complete your policy purchase.";
+  }
+
+  if (intent === INTENTS.RENEWAL) {
+    if (missing.includes("policy_number")) {
+      return "Sure, I can help with your renewal. Could you share your policy number, or the name of your existing insurer?";
+    }
+    if (missing.includes("renewal_date")) {
+      return "Got it. When is your current policy due for renewal?";
+    }
+    return "Thank you. I have initiated your renewal process. A direct payment link has been sent to your WhatsApp. Is there anything else you need?";
+  }
+
+  if (intent === INTENTS.CLAIMS) {
+    if (missing.includes("policy_number")) {
+      return "I'm sorry to hear that. Could you tell me your policy number so I can check your claim eligibility?";
+    }
+    if (missing.includes("hospital_name")) {
+      return "Got it. Which hospital was the treatment or admission at?";
+    }
+    return `Thank you. I have initiated your claim request for ${conversation.customer.hospital_name} under policy number ${conversation.customer.policy_number}. Our claim guide has been sent to your WhatsApp.`;
+  }
+
+  if (intent === INTENTS.CASHLESS_HOSPITAL) {
+    if (missing.includes("city")) {
+      return "Sure, which city are you looking for a cashless network hospital in?";
+    }
+    const city = (conversation.customer.city || "").toLowerCase();
+    const hospitals = CASHLESS_NETWORK[city];
+    if (hospitals && hospitals.length > 0) {
+      return `In ${conversation.customer.city}, our top cashless network hospitals include ${hospitals.slice(0, 2).join(" and ")}. The complete locator link has been sent to your WhatsApp.`;
+    }
+    return `Our network covers over 7,000 cashless hospitals across India. We have sent the cashless locator link to your WhatsApp.`;
+  }
+
+  if (intent === INTENTS.TALK_TO_ADVISOR) {
+    return "I am connecting you to a human health advisor right now. Please hold.";
+  }
+
+  if (intent === INTENTS.COMPLAINT) {
+    return "I understand your concern. Let me connect you with a customer support executive immediately to address this.";
+  }
+
+  return "I'm here to assist you. Are you looking to buy a policy, renew, make a claim, or find a network hospital?";
+}
+
 async function withTimeout(promise, ms, fallbackValue) {
   let timer;
   const timeout = new Promise((resolve) => {
@@ -1256,8 +1474,6 @@ async function syncCRMAndWhatsApp(env, conversation, callSid, tracker) {
         await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
       }
     }
-  } catch (err) {
-    log.error("syncCRMAndWhatsApp failed", { error: err.message });
   }
 }
 
@@ -1300,54 +1516,159 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
       }
     }
 
-    return { conversation, replyText, isEnding: true, wantsHuman: true, aiResult: null };
+    return {
+      conversation,
+      replyText,
+      isEnding: true,
+      wantsHuman: true,
+      aiResult: null,
+      handledBy: "local_rules",
+      usedAI: false,
+      aiProvider: "none",
+      aiLatencyMs: 0,
+      fallbackReason: null,
+      extractedByLocal: {},
+      extractedByGemini: {}
+    };
   }
 
-  const aiResult = await getTurnResponse(env, conversation, speechResult, tracker);
+  // Hybrid Decision Logic!
+  let handledBy = "local_rules";
+  let usedAI = false;
+  let aiProvider = "none";
+  let aiLatencyMs = 0;
+  let fallbackReason = null;
+  let extractedByLocal = {};
+  let extractedByGemini = {};
+  let aiResult = null;
+  let replyText = "";
 
-  for (const [key, value] of Object.entries(aiResult.extractedFields || {})) {
-    if (value !== null && value !== undefined && value !== "") {
-      conversation.customer[key] = value;
+  const localExtracted = runLocalExtraction(speechResult, conversation);
+  const hasUsefulInfo = hasUsefulLocalInfo(localExtracted);
+
+  if (hasUsefulInfo) {
+    // 1. Handled by Local Rules
+    extractedByLocal = localExtracted.extractedFields;
+    
+    // Apply detected intent
+    if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
+      conversation.intent = localExtracted.detectedIntent;
     }
-  }
-  
-  if (aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN) {
-    conversation.intent = aiResult.detectedIntent;
-  }
-  
-  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
-
-  const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
-    const val = conversation.customer[key];
-    return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
-  });
-
-  if (hasAllQuoteFields && !conversation.quote) {
-    conversation.quote = tracker
-      ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
-      : recommendPlan(conversation.customer);
-    if (env.DB && callRow && callRow.customer_id) {
-      try {
-        await tracker.measureAsync("dbWritesMs", async () => {
-          await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
-            .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
-            .run();
-        });
-      } catch (e) {
-        log.error("D1 quote save error", { error: e.message });
+    
+    // Apply extracted fields
+    for (const [key, value] of Object.entries(extractedByLocal)) {
+      if (value !== null && value !== undefined && value !== "") {
+        conversation.customer[key] = value;
       }
     }
+
+    conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
+
+    // Quote generation if all required fields are present
+    const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
+      const val = conversation.customer[key];
+      return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
+    });
+
+    if (hasAllQuoteFields && !conversation.quote) {
+      conversation.quote = tracker
+        ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
+        : recommendPlan(conversation.customer);
+      if (env.DB && callRow && callRow.customer_id) {
+        try {
+          await tracker.measureAsync("dbWritesMs", async () => {
+            await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
+              .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
+              .run();
+          });
+        } catch (e) {
+          log.error("D1 quote save error", { error: e.message });
+        }
+      }
+    }
+
+    // Compute next stage
+    conversation.stage = tracker
+      ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, {
+          detectedIntent: conversation.intent,
+          extractedFields: extractedByLocal,
+          wantsHuman: false
+        }, speechResult))
+      : computeNextStage(conversation, {
+          detectedIntent: conversation.intent,
+          extractedFields: extractedByLocal,
+          wantsHuman: false
+        }, speechResult);
+
+    replyText = generateLocalResponse(conversation);
+
+  } else {
+    // 2. Handled by Gemini (or OpenAI if Gemini fails)
+    handledBy = "gemini";
+    usedAI = true;
+    aiProvider = env.GEMINI_API_KEY ? "gemini" : (env.OPENAI_API_KEY ? "openai" : "none");
+    fallbackReason = "Local rules found no useful fields or intents";
+
+    const aiStart = Date.now();
+    aiResult = await getTurnResponse(env, conversation, speechResult, tracker);
+    aiLatencyMs = Date.now() - aiStart;
+
+    extractedByGemini = aiResult ? (aiResult.extractedFields || {}) : {};
+
+    if (aiResult) {
+      // Apply detected intent
+      if (aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN) {
+        conversation.intent = aiResult.detectedIntent;
+      }
+      
+      // Apply extracted fields
+      for (const [key, value] of Object.entries(extractedByGemini)) {
+        if (value !== null && value !== undefined && value !== "") {
+          conversation.customer[key] = value;
+        }
+      }
+
+      conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
+
+      // Quote generation if all required fields are present
+      const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
+        const val = conversation.customer[key];
+        return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
+      });
+
+      if (hasAllQuoteFields && !conversation.quote) {
+        conversation.quote = tracker
+          ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
+          : recommendPlan(conversation.customer);
+        if (env.DB && callRow && callRow.customer_id) {
+          try {
+            await tracker.measureAsync("dbWritesMs", async () => {
+              await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
+                .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
+                .run();
+            });
+          } catch (e) {
+            log.error("D1 quote save error", { error: e.message });
+          }
+        }
+      }
+
+      if (aiResult.callSummary) conversation.summary = aiResult.callSummary;
+      if (aiResult.objectionType) conversation.objectionCount = (conversation.objectionCount || 0) + 1;
+
+      // Compute next stage
+      conversation.stage = tracker
+        ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, aiResult, speechResult))
+        : computeNextStage(conversation, aiResult, speechResult);
+
+      replyText = aiResult.spokenResponse;
+    } else {
+      replyText = "I'm sorry, I'm having trouble processing that right now. Could you repeat?";
+    }
   }
 
-  if (aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN) conversation.intent = aiResult.detectedIntent;
-  if (aiResult.callSummary) conversation.summary = aiResult.callSummary;
-  if (aiResult.objectionType) conversation.objectionCount = (conversation.objectionCount || 0) + 1;
-
-  conversation.stage = tracker
-    ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, aiResult, speechResult))
-    : computeNextStage(conversation, aiResult, speechResult);
-
-  const appointmentDatetime = aiResult.extractedFields && aiResult.extractedFields.appointment_datetime;
+  // Appointment save logic
+  const appointmentDatetime = (extractedByLocal.appointment_datetime || (aiResult && aiResult.extractedFields && aiResult.extractedFields.appointment_datetime));
   if (appointmentDatetime && !conversation.appointmentBooked) {
     conversation.appointmentBooked = true;
     if (env.DB) {
@@ -1355,6 +1676,7 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     }
   }
 
+  // Update DB Customer details
   if (env.DB) {
     try {
       await dbUpdateCustomer(env.DB, conversation.customer.phone, conversation.customer, tracker);
@@ -1363,7 +1685,6 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     }
   }
 
-  const replyText = aiResult.spokenResponse;
   conversation.history.push({ role: "asha", text: replyText });
   conversation.lastQuestion = replyText;
 
@@ -1379,7 +1700,21 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   }
 
   const isEnding = conversation.stage === STAGES.ENDED;
-  return { conversation, replyText, isEnding, wantsHuman: false, aiResult };
+
+  return {
+    conversation,
+    replyText,
+    isEnding,
+    wantsHuman: conversation.stage === STAGES.HUMAN_TRANSFER,
+    aiResult,
+    handledBy,
+    usedAI,
+    aiProvider,
+    aiLatencyMs,
+    fallbackReason,
+    extractedByLocal,
+    extractedByGemini
+  };
 }
 
 function buildInitialConversation(direction, phone, customer) {
@@ -2215,6 +2550,13 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
         model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
         timings: metrics,
         aiTrace: tracker.aiTrace,
+        handledBy: "local_rules",
+        usedAI: false,
+        aiProvider: "none",
+        aiLatencyMs: 0,
+        fallbackReason: null,
+        extractedByLocal: {},
+        extractedByGemini: {}
       },
       200,
       reqOrigin,
@@ -2222,7 +2564,19 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
     );
   }
 
-  const { replyText, isEnding, wantsHuman, aiResult } = await processTurn(env, conversation, speechResult, sessionId, callRow, tracker);
+  const {
+    replyText,
+    isEnding,
+    wantsHuman,
+    aiResult,
+    handledBy,
+    usedAI,
+    aiProvider,
+    aiLatencyMs,
+    fallbackReason,
+    extractedByLocal,
+    extractedByGemini
+  } = await processTurn(env, conversation, speechResult, sessionId, callRow, tracker);
 
   if (isEnding || wantsHuman) {
     ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, sessionId, tracker));
@@ -2237,10 +2591,10 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
       stage: conversation.stage,
       ended: isEnding,
       detectedIntent: aiResult ? aiResult.detectedIntent : conversation.intent,
-      intentConfidence: aiResult ? aiResult.intentConfidence : null,
+      intentConfidence: aiResult ? aiResult.intentConfidence : (handledBy === "local_rules" ? 1.0 : null),
       objectionType: aiResult ? aiResult.objectionType : null,
       wantsHuman,
-      extractedFields: aiResult ? aiResult.extractedFields : {},
+      extractedFields: aiResult ? aiResult.extractedFields : extractedByLocal,
       customer: conversation.customer,
       missingFields: conversation.missingFields,
       quote: conversation.quote,
@@ -2250,6 +2604,13 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
       model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
       timings: metrics,
       aiTrace: tracker.aiTrace,
+      handledBy,
+      usedAI,
+      aiProvider,
+      aiLatencyMs,
+      fallbackReason,
+      extractedByLocal,
+      extractedByGemini
     },
     200,
     reqOrigin,
