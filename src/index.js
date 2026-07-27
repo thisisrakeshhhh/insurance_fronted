@@ -1474,6 +1474,8 @@ async function syncCRMAndWhatsApp(env, conversation, callSid, tracker) {
         await env.DB.prepare("UPDATE voice_calls SET session_data = ? WHERE call_sid = ?").bind(JSON.stringify(conversation), callSid).run();
       }
     }
+  } catch (err) {
+    log.error("syncCRMAndWhatsApp failed", { error: err.message });
   }
 }
 
