@@ -402,12 +402,12 @@ function runLocalExtraction(speech, conversation) {
                          text.match(/\b([2-9])\s*(?:family\s+members?|members?)\b/i);
   if (familyNumMatch) {
     result.extractedFields.family_members = parseInt(familyNumMatch[1], 10);
-  } else if (/\b(cover my family|my family|our family)\b/i.test(text)) {
-    result.extractedFields.family_members = 3;
-  } else if (/\b(wife|husband|spouse)\b/i.test(text)) {
-    result.extractedFields.family_members = 2;
-  } else if (/\b(kids|children|daughter|son)\b/i.test(text)) {
-    result.extractedFields.family_members = 3;
+  } else if (/\b(family|wife|husband|spouse|kids|children|daughter|son|parent|parents|father|mother)\b/i.test(text)) {
+    if (/\b(wife|husband|spouse)\b/i.test(text) && !/\b(family|kids|children|daughter|son|parents|father|mother)\b/i.test(text)) {
+      result.extractedFields.family_members = 2;
+    } else {
+      result.extractedFields.family_members = 3;
+    }
   }
 
   // 6. City Extraction
@@ -426,7 +426,8 @@ function runLocalExtraction(speech, conversation) {
   }
 
   // 7. Medical History Extraction
-  if (/\b(no disease|no history|no illness|none|nil|nothing|no health issue|no medical history|no issues|healthy)\b/i.test(text)) {
+  const isDirectNo = (lower === "no" || lower === "no.") && conversation && conversation.lastQuestion && conversation.lastQuestion.toLowerCase().includes("medical");
+  if (/\b(no disease|no history|no illness|none|nil|nothing|no health issue|no medical history|no issues|healthy|fit)\b/i.test(text) || isDirectNo) {
     result.extractedFields.medical_history = "None";
   } else {
     const conditions = ["diabetes", "bp", "blood pressure", "hypertension", "asthma", "thyroid", "heart", "cancer", "diabetic"];
@@ -1565,25 +1566,23 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   let replyText = "";
 
   const localExtracted = runLocalExtraction(speechResult, conversation);
+  
+  // ALWAYS merge locally extracted intent and fields first
+  if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
+    conversation.intent = localExtracted.detectedIntent;
+  }
+  for (const [key, value] of Object.entries(localExtracted.extractedFields)) {
+    if (value !== null && value !== undefined && value !== "") {
+      conversation.customer[key] = value;
+    }
+  }
+  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
+
   const hasUsefulInfo = hasUsefulLocalInfo(localExtracted);
 
   if (hasUsefulInfo) {
     // 1. Handled by Local Rules
     extractedByLocal = localExtracted.extractedFields;
-    
-    // Apply detected intent
-    if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
-      conversation.intent = localExtracted.detectedIntent;
-    }
-    
-    // Apply extracted fields
-    for (const [key, value] of Object.entries(extractedByLocal)) {
-      if (value !== null && value !== undefined && value !== "") {
-        conversation.customer[key] = value;
-      }
-    }
-
-    conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
 
     // Quote generation if all required fields are present
     const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
