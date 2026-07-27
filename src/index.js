@@ -501,7 +501,21 @@ function generateLocalResponse(conversation) {
   const missing = conversation.missingFields || [];
 
   if (conversation.appointmentBooked || conversation.stage === STAGES.CLOSING || conversation.stage === STAGES.ENDED) {
-    return "Great! I have scheduled your appointment for tomorrow at 10 AM. A health advisor will call you then to complete your policy purchase. Thank you for calling TATA AIG, goodbye!";
+    if (intent === INTENTS.BUY_POLICY) {
+      return "Great! I have scheduled your appointment for tomorrow at 10 AM. A health advisor will call you then to complete your policy purchase. Thank you for calling TATA AIG, goodbye!";
+    } else if (intent === INTENTS.RENEWAL) {
+      return "Thank you. Your renewal process has been initiated. A direct payment link has been sent to your WhatsApp. Thank you for calling TATA AIG, goodbye!";
+    } else if (intent === INTENTS.CLAIMS) {
+      return `Thank you. I have initiated your claim request for ${conversation.customer.hospital_name || "the hospital"} under policy number ${conversation.customer.policy_number || "your policy"}. Our claim guide has been sent to your WhatsApp. Thank you for calling TATA AIG, goodbye!`;
+    } else if (intent === INTENTS.CASHLESS_HOSPITAL) {
+      const city = (conversation.customer.city || "").toLowerCase();
+      const hospitals = CASHLESS_NETWORK[city];
+      if (hospitals && hospitals.length > 0) {
+        return `In ${conversation.customer.city || "your city"}, our top cashless network hospitals include ${hospitals.slice(0, 2).join(" and ")}. The complete locator link has been sent to your WhatsApp. Thank you for calling TATA AIG, goodbye!`;
+      }
+      return "Our network covers over 7,000 cashless hospitals across India. We have sent the cashless locator link to your WhatsApp. Thank you for calling TATA AIG, goodbye!";
+    }
+    return "Thank you for calling TATA AIG Health Insurance. Goodbye!";
   }
 
   if (intent === INTENTS.UNKNOWN) {
