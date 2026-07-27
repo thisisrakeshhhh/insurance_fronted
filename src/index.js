@@ -1247,13 +1247,21 @@ function buildLocalFallbackResult(conversation, speechResult, tracker, reason, s
     tracker.aiTrace.exactFallbackSourceFunction = sourceFn;
   }
   log.error(`Fallback triggered at ${sourceFn}`, { reason, reqId: tracker?.reqId });
+
+  let spokenResponse;
+  if (conversation.intent && conversation.intent !== INTENTS.UNKNOWN) {
+    spokenResponse = generateLocalResponse(conversation);
+  } else {
+    spokenResponse = getLocalFallbackResponse(speechResult, conversation.stage);
+  }
+
   return {
     extractedFields: {},
     detectedIntent: conversation.intent || INTENTS.UNKNOWN,
     intentConfidence: 0.4,
     objectionType: null,
     wantsHuman: TRANSFER_KEYWORDS.some((k) => speechResult.toLowerCase().includes(k)),
-    spokenResponse: getLocalFallbackResponse(speechResult, conversation.stage),
+    spokenResponse,
     callSummary: conversation.summary || "",
     debugTrace: tracker?.aiTrace || null,
   };
