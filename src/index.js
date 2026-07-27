@@ -470,6 +470,19 @@ function runLocalExtraction(speech, conversation) {
       result.extractedFields.medical_history = found.join(", ");
     }
   }
+  // 8. Appointment Datetime Extraction
+  const isYesToAppointment = conversation && (conversation.stage === STAGES.RECOMMENDATION || conversation.stage === STAGES.APPOINTMENT) &&
+    (/^(yes|sure|ok|okay|yeah|yep|yup|haan|han|schedule|book|yes please|sure thing|connect me|please do|yeah yeah|yes yes)$/i.test(lower) || 
+     lower.includes("yes") || lower.includes("sure") || lower.includes("book") || lower.includes("schedule") || lower.includes("appointment"));
+  
+  if (isYesToAppointment) {
+    result.extractedFields.appointment_datetime = "Tomorrow at 10 AM";
+  } else {
+    const dateTimeMatch = text.match(/\b(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+    if (dateTimeMatch) {
+      result.extractedFields.appointment_datetime = text;
+    }
+  }
 
   return result;
 }
@@ -479,13 +492,17 @@ function hasUsefulLocalInfo(localExtracted) {
     return true;
   }
   const fields = localExtracted.extractedFields || {};
-  const strongFields = ["age", "budget", "city", "family_members", "policy_number", "buying_timeline", "medical_history"];
+  const strongFields = ["age", "budget", "city", "family_members", "policy_number", "buying_timeline", "medical_history", "appointment_datetime"];
   return strongFields.some(f => fields[f] !== null && fields[f] !== undefined && fields[f] !== "");
 }
 
 function generateLocalResponse(conversation) {
   const intent = conversation.intent || INTENTS.UNKNOWN;
   const missing = conversation.missingFields || [];
+
+  if (conversation.appointmentBooked || conversation.stage === STAGES.CLOSING || conversation.stage === STAGES.ENDED) {
+    return "Great! I have scheduled your appointment for tomorrow at 10 AM. A health advisor will call you then to complete your policy purchase. Thank you for calling TATA AIG, goodbye!";
+  }
 
   if (intent === INTENTS.UNKNOWN) {
     return "Thank you for calling TATA AIG Health Insurance. I can help you buy a new policy, renew your current policy, file a claim, or find a network hospital. What would you like to do today?";
@@ -1734,6 +1751,7 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   const appointmentDatetime = (extractedByLocal.appointment_datetime || (aiResult && aiResult.extractedFields && aiResult.extractedFields.appointment_datetime));
   if (appointmentDatetime && !conversation.appointmentBooked) {
     conversation.appointmentBooked = true;
+    conversation.stage = STAGES.CLOSING;
     if (env.DB) {
       await dbSaveAppointment(env, callRow && callRow.customer_id, conversation.customer.phone, appointmentDatetime, conversation.summary, tracker);
     }
