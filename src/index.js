@@ -149,6 +149,27 @@ const POLICY_NUMBER_REGEX = /\bpolic(?:y|ies)?\D{0,15}?(\d{5,12})\b/i;
 const BARE_LONG_NUMBER_REGEX = /\b(\d{6,12})\b/;
 const MOBILE_REGEX = /\b([6-9]\d{9})\b/;
 
+// Buying-timeline fast-path regexes (fixes the "when are you planning to purchase" infinite loop)
+const TIMELINE_IMMEDIATE_REGEX = /\b(right now|immediately|asap|today|now|straight away|as soon as possible)\b/i;
+const TIMELINE_DAY_REGEX = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+const TIMELINE_SOON_REGEX = /\b(this week|tomorrow|couple of days|few days|this weekend)\b/i;
+const TIMELINE_MONTH_REGEX = /\b(this month|next week|soon|shortly)\b/i;
+const TIMELINE_LATER_REGEX = /\b(next month|later|not sure yet|no rush|no hurry|still thinking|still deciding|not decided)\b/i;
+
+function extractBuyingTimeline(text) {
+  if (!text) return null;
+  const dayMatch = text.match(TIMELINE_DAY_REGEX);
+  if (dayMatch) {
+    const day = dayMatch[1];
+    return `This ${day.charAt(0).toUpperCase()}${day.slice(1).toLowerCase()}`;
+  }
+  if (TIMELINE_IMMEDIATE_REGEX.test(text)) return "Immediate";
+  if (TIMELINE_SOON_REGEX.test(text)) return "This week";
+  if (TIMELINE_MONTH_REGEX.test(text)) return "This month";
+  if (TIMELINE_LATER_REGEX.test(text)) return "Not urgent";
+  return null;
+}
+
 class PerformanceTracker {
   constructor() {
     this.reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -425,6 +446,12 @@ function runLocalExtraction(speech, conversation) {
     result.extractedFields.city = city.charAt(0).toUpperCase() + city.slice(1).toLowerCase();
   }
 
+  // 6.5 Buying Timeline Extraction
+  const timeline = extractBuyingTimeline(text);
+  if (timeline) {
+    result.extractedFields.buying_timeline = timeline;
+  }
+
   // 7. Medical History Extraction
   const isDirectNo = (lower === "no" || lower === "no.") && conversation && conversation.lastQuestion && conversation.lastQuestion.toLowerCase().includes("medical");
   if (/\b(no disease|no history|no illness|none|nil|nothing|no health issue|no medical history|no issues|healthy|fit)\b/i.test(text) || isDirectNo) {
@@ -450,7 +477,7 @@ function hasUsefulLocalInfo(localExtracted) {
     return true;
   }
   const fields = localExtracted.extractedFields || {};
-  const strongFields = ["age", "budget", "city", "family_members", "policy_number"];
+  const strongFields = ["age", "budget", "city", "family_members", "policy_number", "buying_timeline", "medical_history"];
   return strongFields.some(f => fields[f] !== null && fields[f] !== undefined && fields[f] !== "");
 }
 
