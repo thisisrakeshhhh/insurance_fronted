@@ -2064,10 +2064,15 @@ async function handleDashboard(request, env) {
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
-async function handleTestCall(request, env) {
+async function handleTestCall(request, env, tracker) {
+  const reqOrigin = request.headers.get("Origin") || "*";
   try {
-    const { to } = await request.json();
-    if (!to) return new Response(JSON.stringify({ error: "Missing 'to' phone number" }), { status: 400 });
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {}
+    const { to } = body;
+    if (!to) return jsonResponse({ error: "Missing 'to' phone number" }, 400, reqOrigin, tracker);
 
     const origin = new URL(request.url).origin;
     const result = await makeOutboundCall(env, {
@@ -2077,9 +2082,9 @@ async function handleTestCall(request, env) {
       statusCallback: `${origin}/voice/status`,
     });
 
-    return new Response(JSON.stringify({ success: true, callSid: result.sid }), { headers: { "Content-Type": "application/json" } });
+    return jsonResponse({ success: true, callSid: result.sid }, 200, reqOrigin, tracker);
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+    return jsonResponse({ error: e.message }, 500, reqOrigin, tracker);
   }
 }
 
@@ -3078,7 +3083,7 @@ export default {
       if (url.pathname === "/health") {
         return jsonResponse({ status: "ok", agent: env.AGENT_NAME || CONFIG.AGENT_NAME, model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL }, 200, reqOrigin, tracker);
       }
-      if (url.pathname === "/test-call" && method === "POST") return await handleTestCall(request, env);
+      if (url.pathname === "/test-call" && method === "POST") return await handleTestCall(request, env, tracker);
 
       if (url.pathname === "/voice/incoming" && method === "POST") return await routeCallIncoming(request, env, ctx, tracker);
       if (url.pathname === "/voice/gather" && method === "POST") return await routeCallGather(request, env, ctx, tracker);
