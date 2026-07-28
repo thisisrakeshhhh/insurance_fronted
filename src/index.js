@@ -120,6 +120,54 @@ const LEAD_TIERS = {
   DEAD: "dead",
 };
 
+const CALL_PROFILES = {
+  [CALL_DIRECTION.INBOUND]: {
+    direction: CALL_DIRECTION.INBOUND,
+    opening: "Thank you for calling TATA AIG Health Insurance. My name is Asha. Press 1 to buy a new policy. Press 2 for renewal. Press 3 for claims. Press 4 for our cashless hospital list. Press 5 to speak with an advisor. Or just tell me what you need.",
+    requiresPermissionStep: false,
+    entryIntent: INTENTS.UNKNOWN,
+    allowedEntryIntents: "any",
+    closingByIntent: {
+      [INTENTS.BUY_POLICY]: "Great! I have scheduled your appointment. A health advisor will call you to complete your policy purchase. Thank you for calling TATA AIG, goodbye!",
+      [INTENTS.RENEWAL]: "Thank you. Your renewal process has been initiated. A direct payment link has been sent to your WhatsApp. Thank you for calling TATA AIG, goodbye!",
+      [INTENTS.CLAIMS]: "Thank you. I have recorded your claim request. Our claim guide has been sent to your WhatsApp. Thank you for calling TATA AIG, goodbye!",
+      [INTENTS.CASHLESS_HOSPITAL]: "We have sent the complete cashless hospital locator link to your WhatsApp. Thank you for calling TATA AIG, goodbye!",
+    },
+    fallbackClosing: "Thank you for calling TATA AIG Health Insurance. Goodbye!",
+    tone: "responsive, helpful, lets the caller lead",
+  },
+  [CALL_DIRECTION.OUTBOUND]: {
+    direction: CALL_DIRECTION.OUTBOUND,
+    opening: "Hello! This is Asha, your AI voice assistant from TATA AIG Health Insurance. Is now an okay time to talk regarding your health insurance?",
+    requiresPermissionStep: true,
+    entryIntent: INTENTS.BUY_POLICY,
+    allowedEntryIntents: [INTENTS.BUY_POLICY],
+    closingByIntent: {
+      [INTENTS.BUY_POLICY]: "Thank you for your time today! I have sent the recommended plan details to your WhatsApp. Have a great day!",
+    },
+    fallbackClosing: "Thanks for your time. Have a great day!",
+    tone: "proactive, respects a 'no' immediately, never pushes past a decline",
+  },
+};
+
+const ACKNOWLEDGMENT_FILLERS = [
+  "Mm-hmm — let's see...",
+  "Got it, one moment...",
+  "Understood — let me check that...",
+  "Sure thing — let me look into that..."
+];
+
+function getAcknowledgmentFiller(turnCount = 0) {
+  return ACKNOWLEDGMENT_FILLERS[turnCount % ACKNOWLEDGMENT_FILLERS.length];
+}
+
+const CANNED_FAQ_PATTERNS = [
+  { key: "tax_benefits", regex: /\b(tax|80d|deduction|save tax|section 80d)\b/i, answer: "Health insurance premiums qualify for a tax deduction under Section 80D up to ₹25,000 for yourself and up to ₹50,000 for senior citizen parents." },
+  { key: "cashless_explainer", regex: /\b(what is cashless|how cashless works|explain cashless|cashless meaning)\b/i, answer: "With cashless hospitalization, TATA AIG settles the bill directly with our 7,000+ network hospitals, so you don't have to pay out of pocket." },
+  { key: "premium_range_query", regex: /\b(starting premium|how much premium|minimum premium|average cost|price range)\b/i, answer: "Comprehensive TATA AIG health plans start from approximately ₹400 per month depending on your age, coverage, and family size." },
+  { key: "claim_process", regex: /\b(claim process|how to claim|file a claim|claim procedure)\b/i, answer: "To file a claim, notify us within 24 hours of emergency admission or 48 hours prior to planned treatment. You can submit documents on our WhatsApp or portal." },
+];
+
 const DOCUMENT_LINKS = {
   brochure: "https://your-cdn.example.com/tata-aig-health-brochure.pdf",
   cashless_locator: "https://your-cdn.example.com/cashless-hospital-locator.pdf",
@@ -165,6 +213,93 @@ const RENEWAL_DATE_REGEX_LITERAL = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|febru
 
 // Explicit user decline at RECOMMENDATION / APPOINTMENT stage
 const DECLINE_REGEX = /^(no|nah|not interested|no thanks|nope|not now|maybe later|abhi nahi|nahi|don't want|dont want)\b/i;
+
+function classifyTurn(conversation, speechText) {
+  const text = (speechText || "").trim();
+  const missing = conversation.missingFields || [];
+
+  // 1. DTMF Digit
+  if (/^[1-9]$/.test(text) && (conversation.stage === STAGES.WELCOME || conversation.stage === STAGES.INTENT_SELECTION || conversation.stage === STAGES.GREETING)) {
+    return { path: "SLOT_FILL", type: "dtmf", field: "intent" };
+  }
+
+  // 2. Explicit Exit / Decline / Transfer
+  if (EXPLICIT_END_REGEX.test(text) || (conversation.stage === STAGES.PERMISSION && PERMISSION_DENIED_REGEX.test(text)) || DECLINE_REGEX.test(text)) {
+    return { path: "SLOT_FILL", type: "command", field: "exit_or_decline" };
+  }
+  if (TRANSFER_KEYWORDS.some((kw) => text.toLowerCase().includes(kw))) {
+    return { path: "SLOT_FILL", type: "command", field: "human_transfer" };
+  }
+
+  // 3. Single Pending Field Target-Scoped Match
+  if (missing.length === 1) {
+    const pending = missing[0];
+    if (pending === "age" && /\b(1[89]|[2-7]\d|80)\b/.test(text)) {
+      return { path: "SLOT_FILL", type: "field", field: "age" };
+    }
+    if (pending === "budget" && /\b(\d{1,4}\s*(?:k|lakh|lac|thousand|l|cr)|[1-9]\d{3,6})\b/i.test(text)) {
+      return { path: "SLOT_FILL", type: "field", field: "budget" };
+    }
+    if (pending === "city") {
+      const knownCities = Object.keys(CASHLESS_NETWORK);
+      const isKnownCity = knownCities.some((c) => text.toLowerCase().includes(c)) || /\b(mumbai|delhi|bangalore|bengaluru|pune|chennai|hyderabad|kolkata|ahmedabad|jaipur|lucknow|noida|gurgaon)\b/i.test(text);
+      if (isKnownCity) return { path: "SLOT_FILL", type: "field", field: "city" };
+    }
+    if (pending === "renewal_date" && extractRenewalDate(text)) {
+      return { path: "SLOT_FILL", type: "field", field: "renewal_date" };
+    }
+    if (pending === "buying_timeline" && extractBuyingTimeline(text)) {
+      return { path: "SLOT_FILL", type: "field", field: "buying_timeline" };
+    }
+    if (pending === "policy_number" && (POLICY_NUMBER_REGEX.test(text) || /\b(\d{5,12})\b/.test(text))) {
+      return { path: "SLOT_FILL", type: "field", field: "policy_number" };
+    }
+    if (pending === "family_members" && /\b(self|myself|family|spouse|wife|husband|children|kids|parents|father|mother|\d\s*member)\b/i.test(text)) {
+      return { path: "SLOT_FILL", type: "field", field: "family_members" };
+    }
+  }
+
+  // 4. Canned FAQ Match
+  for (const faq of CANNED_FAQ_PATTERNS) {
+    if (faq.regex.test(text)) {
+      return { path: "CANNED_FAQ", key: faq.key, answer: faq.answer };
+    }
+  }
+
+  // 5. Default: NEEDS_REASONING
+  return { path: "NEEDS_REASONING", reason: "complex_or_ambiguous" };
+}
+
+function updateLoopBreaker(conversation) {
+  const currentKey = `${conversation.stage}:${(conversation.missingFields || [])[0] || "none"}`;
+  if (conversation.lastStageAndPendingFieldKey === currentKey) {
+    conversation.consecutiveSameStateTurns = (conversation.consecutiveSameStateTurns || 0) + 1;
+  } else {
+    conversation.lastStageAndPendingFieldKey = currentKey;
+    conversation.consecutiveSameStateTurns = 1;
+  }
+
+  if (conversation.consecutiveSameStateTurns >= 3) {
+    conversation.stage = STAGES.HUMAN_TRANSFER;
+    conversation.transferredToHuman = true;
+    return true;
+  }
+  return false;
+}
+
+function normalizeTextForTTS(text = "") {
+  if (!text) return "";
+  let norm = String(text);
+  norm = norm.replace(/₹\s*(\d+(?:,\d+)*)/g, (match, p1) => `${p1.replace(/,/g, "")} rupees`);
+  norm = norm.replace(/(\d+)\s*(?:lakh|lakhs|lac|lacs)\b/gi, "$1 lakh");
+  norm = norm.replace(/(\d+)\s*(?:k|thousand)\b/gi, "$1 thousand");
+  norm = norm.replace(/\b80D\b/gi, "Section 80 D");
+  norm = norm.replace(/\bIRDAI\b/gi, "I R D A I");
+  norm = norm.replace(/\bTATA AIG\b/gi, "Tata A I G");
+  norm = norm.replace(/```[\s\S]*?```/g, "");
+  norm = norm.replace(/[*_~#`]/g, "");
+  return norm.trim();
+}
 
 function extractBuyingTimeline(text) {
   if (!text) return null;
@@ -1731,50 +1866,47 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     }
   }
 
-  // Fast-path extraction run first to capture unprompted details immediately
-  const fastFields = extractFastPathFields(speechResult);
-  for (const [key, value] of Object.entries(fastFields)) {
-    if (value !== null && value !== undefined && value !== "") {
-      conversation.customer[key] = value;
-    }
+  // 1. Upfront Turn Classification (<5ms)
+  const route = classifyTurn(conversation, speechResult);
+  if (tracker) {
+    tracker.routeTrace = route;
   }
+  log.info("Turn classified", { route, speechResult, turnCount: conversation.turnCount });
 
-  const speechLower = speechResult.toLowerCase();
-  const matchedTransferKeyword = TRANSFER_KEYWORDS.find((k) => speechLower.includes(k));
+  // Recompute missing fields first before extraction decisions
+  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
 
-  if (matchedTransferKeyword) {
-    conversation.stage = STAGES.HUMAN_TRANSFER;
-    conversation.transferredToHuman = true;
-    const replyText = "Sure, let me connect you to a human advisor now. Please hold.";
+  // Check 3-turn repeat loop breaker
+  const isStuck = updateLoopBreaker(conversation);
+  if (isStuck) {
+    const replyText = "I want to make sure this gets sorted properly — let me connect you with a specialist who can help directly.";
     conversation.history.push({ role: "asha", text: replyText });
-
     if (env.DB) {
       try {
         await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), callSid).run();
         await dbLogConversationTurn(env.DB, callSid, "asha", replyText, STAGES.HUMAN_TRANSFER, tracker);
       } catch (e) {
-        log.error("D1 transfer save error", { error: e.message });
+        log.error("D1 loop breaker transfer save error", { error: e.message });
       }
     }
-
     return {
       conversation,
       replyText,
-      isEnding: true,
+      isEnding: false,
       wantsHuman: true,
       aiResult: null,
-      handledBy: "local_rules",
+      handledBy: "SLOT_FILL",
+      routeTrace: route,
       usedAI: false,
       aiProvider: "none",
       aiLatencyMs: 0,
-      fallbackReason: null,
+      fallbackReason: "Loop breaker triggered after 3 repeated states",
       extractedByLocal: {},
       extractedByGemini: {}
     };
   }
 
-  // Hybrid Decision Logic!
-  let handledBy = "local_rules";
+  let handledBy = route.path;
   let usedAI = false;
   let aiProvider = "none";
   let aiLatencyMs = 0;
@@ -1784,45 +1916,27 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   let aiResult = null;
   let replyText = "";
 
-  const localExtracted = runLocalExtraction(speechResult, conversation);
-
-  // Fix #1: Guard intent re-detection.
-  // Only allow keyword-based intent detection to overwrite conversation.intent when:
-  //   a) intent is currently UNKNOWN (no task has started), OR
-  //   b) stage is WELCOME / INTENT_SELECTION (user is still choosing from menu).
-  //
-  // Once a real task is active (CLAIMS, RENEWAL, BUY_POLICY, HOSPITAL, etc.)
-  // we treat every utterance as an answer to the current pending field —
-  // NOT as the start of a new intent. Without this guard, answering
-  // "Which hospital?" → "Government Hospital Sector 32" would match the
-  // \bhospital\b keyword and incorrectly switch intent to CASHLESS_HOSPITAL.
-  const isIntentSelectionPhase =
-    conversation.intent === INTENTS.UNKNOWN ||
-    conversation.stage === STAGES.WELCOME ||
-    conversation.stage === STAGES.INTENT_SELECTION;
-
-  if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
-    if (isIntentSelectionPhase) {
-      // Safe to overwrite — no task is active yet.
-      conversation.intent = localExtracted.detectedIntent;
-    }
-    // else: silently discard the keyword-detected candidate; the active task wins.
-  }
-
-  for (const [key, value] of Object.entries(localExtracted.extractedFields)) {
-    if (value !== null && value !== undefined && value !== "") {
-      conversation.customer[key] = value;
-    }
-  }
-  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
-
-  const hasUsefulInfo = hasUsefulLocalInfo(localExtracted);
-
-  if (hasUsefulInfo) {
-    // 1. Handled by Local Rules
+  if (route.path === "SLOT_FILL") {
+    // -----------------------------------------------------------------------
+    // PATH 1: SLOT_FILL (Deterministic 0ms Code Path)
+    // -----------------------------------------------------------------------
+    const localExtracted = runLocalExtraction(speechResult, conversation);
     extractedByLocal = localExtracted.extractedFields;
 
-    // Quote generation if all required fields are present
+    if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
+      if (conversation.intent === INTENTS.UNKNOWN || conversation.stage === STAGES.WELCOME || conversation.stage === STAGES.INTENT_SELECTION) {
+        conversation.intent = localExtracted.detectedIntent;
+      }
+    }
+
+    for (const [key, value] of Object.entries(extractedByLocal)) {
+      if (value !== null && value !== undefined && value !== "") {
+        conversation.customer[key] = value;
+      }
+    }
+    conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
+
+    // Compute Quote if required fields present
     const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
       const val = conversation.customer[key];
       return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
@@ -1832,20 +1946,8 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
       conversation.quote = tracker
         ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
         : recommendPlan(conversation.customer);
-      if (env.DB && callRow && callRow.customer_id) {
-        try {
-          await tracker.measureAsync("dbWritesMs", async () => {
-            await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
-              .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
-              .run();
-          });
-        } catch (e) {
-          log.error("D1 quote save error", { error: e.message });
-        }
-      }
     }
 
-    // Compute next stage
     conversation.stage = tracker
       ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, {
           detectedIntent: conversation.intent,
@@ -1860,13 +1962,21 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
 
     replyText = generateLocalResponse(conversation);
 
+  } else if (route.path === "CANNED_FAQ") {
+    // -----------------------------------------------------------------------
+    // PATH 2: CANNED_FAQ (Pre-cached zero-AI lookup)
+    // -----------------------------------------------------------------------
+    replyText = route.answer;
+
   } else {
-    // 2. Handled by Gemini (or OpenAI if Gemini fails)
-    handledBy = "gemini";
+    // -----------------------------------------------------------------------
+    // PATH 3: NEEDS_REASONING (Gemini Escalation with Function Calling)
+    // -----------------------------------------------------------------------
+    handledBy = "NEEDS_REASONING";
     usedAI = true;
     aiProvider = env.GEMINI_API_KEY ? "gemini" : (env.OPENAI_API_KEY ? "openai" : "none");
-    fallbackReason = "Local rules found no useful fields or intents";
 
+    const filler = getAcknowledgmentFiller(conversation.turnCount);
     const aiStart = Date.now();
     aiResult = await getTurnResponse(env, conversation, speechResult, tracker);
     aiLatencyMs = Date.now() - aiStart;
@@ -1874,12 +1984,9 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     extractedByGemini = aiResult ? (aiResult.extractedFields || {}) : {};
 
     if (aiResult) {
-      // Apply detected intent
       if (aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN) {
         conversation.intent = aiResult.detectedIntent;
       }
-      
-      // Apply extracted fields
       for (const [key, value] of Object.entries(extractedByGemini)) {
         if (value !== null && value !== undefined && value !== "") {
           conversation.customer[key] = value;
@@ -1888,7 +1995,6 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
 
       conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
 
-      // Quote generation if all required fields are present
       const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
         const val = conversation.customer[key];
         return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
@@ -1898,30 +2004,19 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
         conversation.quote = tracker
           ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
           : recommendPlan(conversation.customer);
-        if (env.DB && callRow && callRow.customer_id) {
-          try {
-            await tracker.measureAsync("dbWritesMs", async () => {
-              await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
-                .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
-                .run();
-            });
-          } catch (e) {
-            log.error("D1 quote save error", { error: e.message });
-          }
-        }
       }
 
       if (aiResult.callSummary) conversation.summary = aiResult.callSummary;
       if (aiResult.objectionType) conversation.objectionCount = (conversation.objectionCount || 0) + 1;
 
-      // Compute next stage
       conversation.stage = tracker
         ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, aiResult, speechResult))
         : computeNextStage(conversation, aiResult, speechResult);
 
-      replyText = aiResult.spokenResponse;
+      const spokenResponseText = aiResult.spokenResponse || generateLocalResponse(conversation);
+      replyText = `${filler} ${spokenResponseText}`;
     } else {
-      replyText = "I'm sorry, I'm having trouble processing that right now. Could you repeat?";
+      replyText = `${filler} I want to make sure I get your requirements right. Could you tell me a bit more?`;
     }
   }
 
@@ -1994,10 +2089,12 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
 }
 
 function buildInitialConversation(direction, phone, customer) {
-  const initialIntent = direction === CALL_DIRECTION.OUTBOUND ? INTENTS.BUY_POLICY : INTENTS.UNKNOWN;
+  const profile = CALL_PROFILES[direction] || CALL_PROFILES[CALL_DIRECTION.INBOUND];
+  const initialIntent = profile.entryIntent || INTENTS.UNKNOWN;
   const missingFields = getMissingFields(customer, initialIntent);
   return {
     direction,
+    profileKey: profile.direction,
     intent: initialIntent,
     history: [],
     customer: {
@@ -2020,6 +2117,8 @@ function buildInitialConversation(direction, phone, customer) {
     lastQuestion: "",
     stage: direction === CALL_DIRECTION.OUTBOUND ? STAGES.GREETING : STAGES.WELCOME,
     objectionCount: 0,
+    consecutiveSameStateTurns: 0,
+    lastStageAndPendingFieldKey: "",
     quote: null,
     whatsappSent: false,
     transferredToHuman: false,
@@ -2029,9 +2128,8 @@ function buildInitialConversation(direction, phone, customer) {
 }
 
 function buildGreeting(direction) {
-  return direction === CALL_DIRECTION.OUTBOUND
-    ? "Hello! This is Asha, your AI voice assistant from TATA AIG Health Insurance. Am I speaking with the right person regarding your health insurance needs?"
-    : "Thank you for calling TATA AIG Health Insurance. My name is Asha. Press 1 to buy a new policy. Press 2 for renewal. Press 3 for claims. Press 4 for our cashless hospital list. Press 5 to speak with an advisor. Or just tell me what you need.";
+  const profile = CALL_PROFILES[direction] || CALL_PROFILES[CALL_DIRECTION.INBOUND];
+  return profile.opening;
 }
 
 async function handleDashboard(request, env) {
@@ -2720,12 +2818,13 @@ function jsonResponse(data, status = 200, reqOrigin, tracker) {
 async function handleElevenLabsTTS(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const url = new URL(request.url);
-  const text = url.searchParams.get("text");
+  const rawText = url.searchParams.get("text");
 
-  if (!text) {
+  if (!rawText) {
     return jsonResponse({ error: "Missing text parameter" }, 400, reqOrigin, tracker);
   }
 
+  const text = normalizeTextForTTS(rawText);
   const apiKey = env.ELEVENLABS_API_KEY;
   if (!apiKey) {
     log.warn("ElevenLabs TTS requested but ELEVENLABS_API_KEY is not configured");
@@ -2733,8 +2832,8 @@ async function handleElevenLabsTTS(request, env, tracker) {
   }
 
   const voiceId = env.ELEVENLABS_VOICE_ID || "21m00Tcm4TlvDq8ikWAM";
-  const modelId = env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
-  const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`;
+  const modelId = env.ELEVENLABS_MODEL_REALTIME || env.ELEVENLABS_MODEL || "eleven_flash_v2_5";
+  const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?optimize_streaming_latency=3`;
 
   try {
     const response = await fetch(ttsUrl, {
@@ -2748,8 +2847,10 @@ async function handleElevenLabsTTS(request, env, tracker) {
         text: text,
         model_id: modelId,
         voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75
+          stability: 0.35,
+          similarity_boost: 0.8,
+          style: 0.25,
+          use_speaker_boost: true
         }
       })
     });

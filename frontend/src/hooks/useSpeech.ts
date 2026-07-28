@@ -20,6 +20,7 @@ const SR = typeof window !== 'undefined'
 export function useSpeech(): SpeechHook {
   const recognitionRef = useRef<SpeechRecognition | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const isSpeakingRef = useRef<boolean>(false)
   const hasSpokenRef = useRef<boolean>(false)
   const settings = useSettingsStore()
 
@@ -35,6 +36,10 @@ export function useSpeech(): SpeechHook {
   const startListening = useCallback((onTranscript: TranscriptCallback, onSilence?: () => void) => {
     if (!SR) {
       toast.error('Speech recognition is not supported in this browser.')
+      return
+    }
+    if (isSpeakingRef.current) {
+      // Pause mic start while assistant is speaking to avoid echo self-triggering
       return
     }
     stopListening()
@@ -79,6 +84,7 @@ export function useSpeech(): SpeechHook {
   }, [settings.speechLang, stopListening])
 
   const stopSpeaking = useCallback(() => {
+    isSpeakingRef.current = false
     try {
       window.speechSynthesis?.cancel()
     } catch {}
@@ -93,6 +99,7 @@ export function useSpeech(): SpeechHook {
 
   const speakNative = useCallback((text: string, onEnd?: () => void) => {
     if (!window.speechSynthesis) {
+      isSpeakingRef.current = false
       onEnd?.()
       return
     }
@@ -107,13 +114,20 @@ export function useSpeech(): SpeechHook {
       if (voice) utterance.voice = voice
     }
 
-    utterance.onend = () => onEnd?.()
-    utterance.onerror = () => onEnd?.()
+    const wrapEnd = () => {
+      isSpeakingRef.current = false
+      onEnd?.()
+    }
+
+    utterance.onend = wrapEnd
+    utterance.onerror = wrapEnd
+    isSpeakingRef.current = true
     window.speechSynthesis.speak(utterance)
   }, [settings.ttsRate, settings.ttsPitch, settings.speechLang, settings.ttsVoice])
 
   const speak = useCallback((text: string, onEnd?: () => void) => {
     stopSpeaking()
+    isSpeakingRef.current = true
 
     const workerUrl = getWorkerUrl()
     const ttsAudioUrl = `${workerUrl}/api/tts?text=${encodeURIComponent(text)}`
@@ -125,6 +139,7 @@ export function useSpeech(): SpeechHook {
       if (endedHandled) return
       endedHandled = true
       audioRef.current = null
+      isSpeakingRef.current = false
       onEnd?.()
     }
 

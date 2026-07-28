@@ -48,10 +48,19 @@ export interface TurnResponse {
   turnCount: number
   latencyMs: number
   model: string
-  handledBy?: 'local_rules' | 'gemini'
+  handledBy?: 'SLOT_FILL' | 'CANNED_FAQ' | 'NEEDS_REASONING' | 'local_rules' | 'gemini'
+  routeTrace?: {
+    path: 'SLOT_FILL' | 'CANNED_FAQ' | 'NEEDS_REASONING'
+    type?: string
+    field?: string
+    key?: string
+    reason?: string
+  }
   usedAI?: boolean
   aiProvider?: 'none' | 'gemini' | 'openai'
   aiLatencyMs?: number
+  leadTier?: 'hot' | 'warm' | 'cold' | 'dead'
+  leadScore?: number
   fallbackReason?: string | null
   extractedByLocal?: Partial<Customer>
   extractedByGemini?: Partial<Customer>

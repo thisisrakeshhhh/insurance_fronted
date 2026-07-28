@@ -46,14 +46,16 @@ export function AIInspector({ lastTurn }: Props) {
       <div className="flex items-center justify-between text-xs">
         <div className="flex items-center gap-1.5 text-text-muted">
           <Zap size={11} />
-          Handled By
+          Route Classification
         </div>
-        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-          lastTurn.handledBy === 'local_rules'
-            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-            : 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'
+        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+          lastTurn.handledBy === 'SLOT_FILL' || lastTurn.handledBy === 'local_rules'
+            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+            : lastTurn.handledBy === 'CANNED_FAQ'
+            ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30'
+            : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
         }`}>
-          {lastTurn.handledBy === 'local_rules' ? 'Local Rules' : 'Gemini AI'}
+          {lastTurn.handledBy || 'SLOT_FILL'}
         </span>
       </div>
 
