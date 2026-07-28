@@ -1,5 +1,6 @@
 import { useRef, useCallback } from 'react'
 import { useSettingsStore } from '@/store'
+import { getWorkerUrl } from '@/api/worker'
 import { toast } from 'sonner'
 
 type TranscriptCallback = (text: string, isFinal: boolean, confidence: number) => void
@@ -18,6 +19,7 @@ const SR = typeof window !== 'undefined'
 
 export function useSpeech(): SpeechHook {
   const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
   const hasSpokenRef = useRef<boolean>(false)
   const settings = useSettingsStore()
 
@@ -80,15 +82,20 @@ export function useSpeech(): SpeechHook {
     try {
       window.speechSynthesis?.cancel()
     } catch {}
+    if (audioRef.current) {
+      try {
+        audioRef.current.pause()
+        audioRef.current.currentTime = 0
+      } catch {}
+      audioRef.current = null
+    }
   }, [])
 
-  const speak = useCallback((text: string, onEnd?: () => void) => {
+  const speakNative = useCallback((text: string, onEnd?: () => void) => {
     if (!window.speechSynthesis) {
       onEnd?.()
       return
     }
-    stopSpeaking()
-
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.rate = settings.ttsRate
     utterance.pitch = settings.ttsPitch
@@ -102,9 +109,36 @@ export function useSpeech(): SpeechHook {
 
     utterance.onend = () => onEnd?.()
     utterance.onerror = () => onEnd?.()
-
     window.speechSynthesis.speak(utterance)
-  }, [settings.ttsRate, settings.ttsPitch, settings.speechLang, settings.ttsVoice, stopSpeaking])
+  }, [settings.ttsRate, settings.ttsPitch, settings.speechLang, settings.ttsVoice])
+
+  const speak = useCallback((text: string, onEnd?: () => void) => {
+    stopSpeaking()
+
+    const workerUrl = getWorkerUrl()
+    const ttsAudioUrl = `${workerUrl}/api/tts?text=${encodeURIComponent(text)}`
+    const audio = new Audio(ttsAudioUrl)
+    audioRef.current = audio
+
+    let endedHandled = false
+    const handleEnd = () => {
+      if (endedHandled) return
+      endedHandled = true
+      audioRef.current = null
+      onEnd?.()
+    }
+
+    audio.onended = handleEnd
+    audio.onerror = () => {
+      logError('ElevenLabs audio error, falling back to native TTS', null)
+      speakNative(text, onEnd)
+    }
+
+    audio.play().catch((err) => {
+      logError('ElevenLabs audio play failed, falling back to native TTS', err)
+      speakNative(text, onEnd)
+    })
+  }, [stopSpeaking, speakNative])
 
   return { startListening, stopListening, speak, stopSpeaking, isSupported }
 }

@@ -721,12 +721,20 @@ function escapeXml(str = "") {
     .replace(/'/g, "&apos;");
 }
 
-function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Aditi", numDigits = null }) {
+function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Aditi", numDigits = null, env = null }) {
+  const origin = actionUrl ? new URL(actionUrl).origin : "";
+  const useEleven = !!(env?.ELEVENLABS_API_KEY);
+  const audioUrl = `${origin}/api/tts?text=${encodeURIComponent(text)}`;
+
+  const promptXml = useEleven
+    ? `<Play>${escapeXml(audioUrl)}</Play>`
+    : `<Say voice="${voice}">${escapeXml(text)}</Say>`;
+
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech dtmf" action="${escapeXml(actionUrl)}" method="POST"
           language="${language}" speechTimeout="auto" speechModel="experimental" enhanced="true" timeout="${CONFIG.GATHER_TIMEOUT_SEC}"${numDigits ? ` numDigits="${numDigits}" finishOnKey=""` : ""}>
-    <Say voice="${voice}">${escapeXml(text)}</Say>
+    ${promptXml}
   </Gather>
   <Say voice="${voice}">Sorry, I didn't hear you clearly.</Say>
   <Redirect method="POST">${escapeXml(actionUrl.replace("/voice/gather", "/voice/fallback"))}</Redirect>
@@ -734,19 +742,29 @@ function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Adit
   return new Response(xml, { headers: { "Content-Type": "text/xml" } });
 }
 
-function sayAndHangup({ text, voice = "Polly.Aditi" }) {
+function sayAndHangup({ text, voice = "Polly.Aditi", env = null, origin = "" }) {
+  let promptXml = `<Say voice="${voice}">${escapeXml(text)}</Say>`;
+  if (env?.ELEVENLABS_API_KEY && origin) {
+    const audioUrl = `${origin}/api/tts?text=${encodeURIComponent(text)}`;
+    promptXml = `<Play>${escapeXml(audioUrl)}</Play>`;
+  }
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${voice}">${escapeXml(text)}</Say>
+  ${promptXml}
   <Hangup/>
 </Response>`;
   return new Response(xml, { headers: { "Content-Type": "text/xml" } });
 }
 
-function sayAndDial({ text, dialNumber, voice = "Polly.Aditi" }) {
+function sayAndDial({ text, dialNumber, voice = "Polly.Aditi", env = null, origin = "" }) {
+  let promptXml = `<Say voice="${voice}">${escapeXml(text)}</Say>`;
+  if (env?.ELEVENLABS_API_KEY && origin) {
+    const audioUrl = `${origin}/api/tts?text=${encodeURIComponent(text)}`;
+    promptXml = `<Play>${escapeXml(audioUrl)}</Play>`;
+  }
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${voice}">${escapeXml(text)}</Say>
+  ${promptXml}
   <Dial>${escapeXml(dialNumber)}</Dial>
 </Response>`;
   return new Response(xml, { headers: { "Content-Type": "text/xml" } });
@@ -2699,6 +2717,64 @@ function jsonResponse(data, status = 200, reqOrigin, tracker) {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
+async function handleElevenLabsTTS(request, env, tracker) {
+  const reqOrigin = request.headers.get("Origin") || "*";
+  const url = new URL(request.url);
+  const text = url.searchParams.get("text");
+
+  if (!text) {
+    return jsonResponse({ error: "Missing text parameter" }, 400, reqOrigin, tracker);
+  }
+
+  const apiKey = env.ELEVENLABS_API_KEY;
+  if (!apiKey) {
+    log.warn("ElevenLabs TTS requested but ELEVENLABS_API_KEY is not configured");
+    return jsonResponse({ error: "ElevenLabs API Key not configured" }, 500, reqOrigin, tracker);
+  }
+
+  const voiceId = env.ELEVENLABS_VOICE_ID || "21m00Tcm4TlvDq8ikWAM";
+  const modelId = env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
+  const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`;
+
+  try {
+    const response = await fetch(ttsUrl, {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg"
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: modelId,
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.75
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      log.error("ElevenLabs API error response", { status: response.status, error: errText });
+      return jsonResponse({ error: "ElevenLabs TTS generation failed", details: errText }, 500, reqOrigin, tracker);
+    }
+
+    return new Response(response.body, {
+      status: 200,
+      headers: {
+        "Content-Type": "audio/mpeg",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Cache-Control": "public, max-age=86400"
+      }
+    });
+  } catch (err) {
+    log.error("ElevenLabs TTS fetch error", { error: err.message, stack: err.stack });
+    return jsonResponse({ error: "TTS fetch error", details: err.message }, 500, reqOrigin, tracker);
+  }
+}
+
 async function handleBrowserSession(request, env, ctx, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   let body = {};
@@ -3091,6 +3167,7 @@ export default {
       if (url.pathname === "/voice/browser-turn" && method === "POST") return await handleBrowserTurn(request, env, ctx, tracker);
 
       if (url.pathname.startsWith("/api/db/") && method === "GET") return await handleApiDb(request, env, tracker);
+      if (url.pathname === "/api/tts" && (method === "GET" || method === "POST")) return await handleElevenLabsTTS(request, env, tracker);
       if (url.pathname === "/api/health" && method === "GET") return await handleEnhancedHealth(request, env, tracker);
       if (url.pathname === "/api/status" && method === "GET") return await handleApiStatus(request, env, tracker);
       if (url.pathname === "/api/config" && method === "GET") return handleApiConfig(request, env, tracker);

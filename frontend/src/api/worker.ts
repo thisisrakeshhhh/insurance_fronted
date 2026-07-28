@@ -1,7 +1,7 @@
 import { useSettingsStore } from '@/store'
 import type { DbTableResponse, HealthStatus, SessionResponse, TurnResponse } from '@/types'
 
-function getWorkerUrl() {
+export function getWorkerUrl() {
   if (import.meta.env.DEV) return ''
   return useSettingsStore.getState().workerUrl || import.meta.env.VITE_WORKER_URL || 'https://tata-aig-voice-agent.whatsappai.workers.dev'
 }
