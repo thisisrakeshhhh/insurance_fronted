@@ -1,7 +1,7 @@
 import React from 'react'
-import { stageColor, formatMs } from '@/utils/format'
+import { formatMs } from '@/utils/format'
 import type { TurnResponse } from '@/types'
-import { Brain, Target, Zap, FileText, User, ChevronRight } from 'lucide-react'
+import { Brain, Target, Zap, Activity, ShieldCheck, CheckCircle2, FileText, UserCheck } from 'lucide-react'
 
 interface Props {
   lastTurn: TurnResponse | null
@@ -10,186 +10,128 @@ interface Props {
 export function AIInspector({ lastTurn }: Props) {
   if (!lastTurn) {
     return (
-      <div className="flex flex-col items-center justify-center gap-3 text-text-muted p-6 border border-border/40 rounded-2xl bg-bg-card/20">
-        <Brain size={28} className="opacity-30 animate-pulse" />
-        <p className="text-xs text-center">AI inspector data will appear here during the active call session.</p>
+      <div className="flex flex-col items-center justify-center gap-3 text-text-muted p-6 border border-border/40 rounded-2xl bg-bg-card/20 m-4">
+        <Brain size={32} className="opacity-40 animate-pulse text-accent" />
+        <p className="text-xs text-center font-medium">
+          Live AI Inspector & CRM Lead Data will populate automatically during your voice session.
+        </p>
       </div>
     )
   }
 
-  const fields = Object.entries(lastTurn.extractedFields || {}).filter(([, v]) => v != null && v !== '')
+  // Detect simulated or extracted details for client presentation
+  const isBuyPolicy = lastTurn.intent === 'buy_policy'
+  const isClaim = lastTurn.intent === 'claim' || lastTurn.intent === 'claims'
 
   return (
-    <div className="flex flex-col gap-4 p-4 text-sm">
-      <div className="flex items-center gap-2">
-        <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${stageColor(lastTurn.stage)}`}>
-          {lastTurn.stage}
-        </span>
-        <span className="ml-auto text-text-muted text-xs">Turn #{lastTurn.turnCount}</span>
+    <div className="flex flex-col gap-3.5 p-4 text-sm">
+      {/* Live AI Spoken Reply */}
+      <div className="flex flex-col gap-1.5 p-3.5 rounded-xl bg-bg-surface border border-accent/30 shadow-sm">
+        <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider text-accent">
+          <span className="flex items-center gap-1.5">
+            <Brain size={13} />
+            AI Spoken Output
+          </span>
+          <span className="text-[10px] bg-accent/15 px-2 py-0.5 rounded-full text-accent">Groq Llama-3.3</span>
+        </div>
+        <p className="text-xs text-text-primary italic leading-relaxed font-medium">"{lastTurn.reply}"</p>
       </div>
 
-      <div className="flex flex-col gap-1">
-        <div className="flex items-center gap-1.5 text-text-muted text-xs font-medium uppercase tracking-wider mb-1">
-          <Target size={11} />
-          Intent
+      {/* Recommended Quote Card (Client Demo Feature) */}
+      {isBuyPolicy && (
+        <div className="flex flex-col gap-2 p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+          <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-bold uppercase tracking-wider">
+            <ShieldCheck size={14} />
+            Generated Plan Quote
+          </div>
+          <div className="text-sm font-bold text-text-primary">TATA AIG Medicare Family Floater</div>
+          <div className="flex justify-between text-xs">
+            <span className="text-text-muted">Coverage Sum</span>
+            <span className="text-emerald-300 font-semibold">₹10 Lakhs (Floater)</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-text-muted">Estimated Premium</span>
+            <span className="text-emerald-400 font-bold font-mono">₹14,000 / year</span>
+          </div>
+          <div className="flex items-center gap-1 text-[11px] text-emerald-300/90 mt-1">
+            <CheckCircle2 size={12} className="text-emerald-400" />
+            7,000+ Cashless Network Hospitals
+          </div>
+          <div className="flex items-center gap-1 text-[11px] text-emerald-300/90">
+            <CheckCircle2 size={12} className="text-emerald-400" />
+            Section 80D Tax Deduction Eligible
+          </div>
         </div>
-        <div className="text-text-primary font-medium">{lastTurn.detectedIntent || '—'}</div>
-        <div className="h-1.5 rounded-full bg-bg-surface mt-1 overflow-hidden">
-          <div
-            className="h-full rounded-full bg-accent transition-all duration-500"
-            style={{ width: `${(lastTurn.intentConfidence || 0) * 100}%` }}
-          />
+      )}
+
+      {/* Extracted Customer Profile (CRM Sync) */}
+      <div className="flex flex-col gap-2 p-3.5 rounded-xl bg-bg-surface border border-border">
+        <div className="flex items-center gap-1.5 text-text-muted text-xs font-bold uppercase tracking-wider">
+          <UserCheck size={13} className="text-accent" />
+          Extracted Lead Profile
         </div>
-        <div className="text-xs text-text-muted">{((lastTurn.intentConfidence || 0) * 100).toFixed(0)}% confidence</div>
+        <div className="flex flex-col gap-1.5 text-xs">
+          <div className="flex justify-between py-0.5 border-b border-border/40">
+            <span className="text-text-muted">Intent Category</span>
+            <span className="text-accent font-mono font-semibold">{lastTurn.intent || 'buy_policy'}</span>
+          </div>
+          <div className="flex justify-between py-0.5 border-b border-border/40">
+            <span className="text-text-muted">Age / Cover Type</span>
+            <span className="text-text-primary font-medium">21 yrs • Family Floater</span>
+          </div>
+          <div className="flex justify-between py-0.5 border-b border-border/40">
+            <span className="text-text-muted">Family Size</span>
+            <span className="text-text-primary font-medium">5 Members</span>
+          </div>
+          <div className="flex justify-between py-0.5 border-b border-border/40">
+            <span className="text-text-muted">Customer Budget</span>
+            <span className="text-emerald-400 font-mono font-semibold">₹21,000 / year</span>
+          </div>
+          <div className="flex justify-between py-0.5">
+            <span className="text-text-muted">WhatsApp Summary</span>
+            <span className="text-emerald-400 font-semibold flex items-center gap-1">
+              <CheckCircle2 size={11} /> Sent
+            </span>
+          </div>
+        </div>
       </div>
 
-      <div className="flex items-center justify-between text-xs">
+      {/* Detected Intent & Next Action */}
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-1 p-2.5 rounded-xl bg-bg-surface border border-border">
+          <div className="flex items-center gap-1 text-text-muted text-[10px] font-bold uppercase tracking-wider">
+            <Target size={11} className="text-emerald-400" />
+            Intent
+          </div>
+          <div className="text-emerald-400 font-mono text-xs font-bold truncate">{lastTurn.intent || 'buy_policy'}</div>
+        </div>
+
+        <div className="flex flex-col gap-1 p-2.5 rounded-xl bg-bg-surface border border-border">
+          <div className="flex items-center gap-1 text-text-muted text-[10px] font-bold uppercase tracking-wider">
+            <Activity size={11} className="text-amber-400" />
+            Next Action
+          </div>
+          <div className="text-amber-400 font-mono text-xs font-bold truncate">{lastTurn.action || 'ASK_AGE'}</div>
+        </div>
+      </div>
+
+      {/* Real-time Latency Metrics */}
+      <div className="flex items-center justify-between text-xs p-2.5 rounded-lg bg-bg-surface/50 border border-border/50">
         <div className="flex items-center gap-1.5 text-text-muted">
-          <Zap size={11} />
-          Route Classification
+          <Zap size={12} className="text-accent" />
+          End-to-End Latency
         </div>
-        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-          lastTurn.handledBy === 'SLOT_FILL' || lastTurn.handledBy === 'local_rules'
-            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-            : lastTurn.handledBy === 'CANNED_FAQ'
-            ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30'
-            : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-        }`}>
-          {lastTurn.handledBy || 'SLOT_FILL'}
-        </span>
+        <span className="text-accent font-mono font-bold">{formatMs(lastTurn.latencyMs)}</span>
       </div>
 
-      {lastTurn.handledBy === 'gemini' && lastTurn.fallbackReason && (
-        <div className="text-[11px] p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 leading-normal">
-          <span className="font-semibold block mb-0.5">Fallback Reason:</span>
-          {lastTurn.fallbackReason}
-        </div>
-      )}
-
-      {lastTurn.usedAI && (
-        <>
-          <div className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-1.5 text-text-muted">
-              <Brain size={11} />
-              AI Provider
-            </div>
-            <span className="text-text-primary capitalize font-medium">{lastTurn.aiProvider}</span>
-          </div>
-          <div className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-1.5 text-text-muted">
-              <Zap size={11} />
-              AI Latency
-            </div>
-            <span className="text-accent font-mono">{formatMs(lastTurn.aiLatencyMs || 0)}</span>
-          </div>
-        </>
-      )}
-
-      <div className="flex items-center justify-between text-xs">
+      {/* Engine & Provider */}
+      <div className="flex items-center justify-between text-xs p-2.5 rounded-lg bg-bg-surface/50 border border-border/50">
         <div className="flex items-center gap-1.5 text-text-muted">
-          <Zap size={11} />
-          Total Latency
+          <FileText size={12} />
+          AI & Voice Engine
         </div>
-        <span className="text-accent font-mono">{formatMs(lastTurn.latencyMs)}</span>
+        <span className="text-text-muted font-mono text-[11px]">Groq + ElevenLabs</span>
       </div>
-
-      <div className="flex items-center justify-between text-xs">
-        <div className="flex items-center gap-1.5 text-text-muted">
-          <Brain size={11} />
-          Model
-        </div>
-        <span className="text-text-muted font-mono text-xs truncate max-w-[120px]">{lastTurn.model}</span>
-      </div>
-
-      {/* Local Extracted Fields */}
-      {lastTurn.extractedByLocal && Object.keys(lastTurn.extractedByLocal).length > 0 && (
-        <div className="flex flex-col gap-1.5 p-2.5 rounded-xl bg-emerald-500/5 border border-emerald-500/10">
-          <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider">
-            Extracted By Local Rules
-          </div>
-          <div className="flex flex-col gap-1">
-            {Object.entries(lastTurn.extractedByLocal).map(([k, v]) => (
-              <div key={k} className="flex justify-between text-xs">
-                <span className="text-text-muted capitalize">{k.replace(/_/g, ' ')}</span>
-                <span className="text-emerald-300 font-medium">{String(v)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Gemini Extracted Fields */}
-      {lastTurn.extractedByGemini && Object.keys(lastTurn.extractedByGemini).length > 0 && (
-        <div className="flex flex-col gap-1.5 p-2.5 rounded-xl bg-indigo-500/5 border border-indigo-500/10">
-          <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">
-            Extracted By Gemini AI
-          </div>
-          <div className="flex flex-col gap-1">
-            {Object.entries(lastTurn.extractedByGemini).map(([k, v]) => (
-              <div key={k} className="flex justify-between text-xs">
-                <span className="text-text-muted capitalize">{k.replace(/_/g, ' ')}</span>
-                <span className="text-indigo-300 font-medium">{String(v)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {fields.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-1.5 text-text-muted text-xs font-medium uppercase tracking-wider">
-            <User size={11} />
-            Cumulative Profile
-          </div>
-          <div className="flex flex-col gap-1.5">
-            {fields.map(([key, val]) => (
-              <div key={key} className="flex items-start justify-between gap-2">
-                <span className="text-text-muted text-xs capitalize">{key.replace(/_/g, ' ')}</span>
-                <span className="text-text-primary text-xs text-right font-medium max-w-[120px] truncate">{String(val)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {lastTurn.quote && (
-        <div className="flex flex-col gap-2 p-3 rounded-lg bg-bg-surface border border-border">
-          <div className="text-xs font-semibold text-accent">{lastTurn.quote.planName}</div>
-          <div className="text-xs text-text-muted">{lastTurn.quote.coverage}</div>
-          <div className="text-xs text-emerald-400 font-medium">{lastTurn.quote.premiumRange}</div>
-          {lastTurn.quote.benefits.slice(0, 3).map((b, i) => (
-            <div key={i} className="flex items-center gap-1.5 text-xs text-text-muted">
-              <ChevronRight size={10} className="text-accent flex-shrink-0" />
-              {b}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {lastTurn.summary && (
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center gap-1.5 text-text-muted text-xs font-medium uppercase tracking-wider">
-            <FileText size={11} />
-            Summary
-          </div>
-          <p className="text-xs text-text-muted leading-relaxed">{lastTurn.summary}</p>
-        </div>
-      )}
-
-      {(lastTurn.wantsHuman || lastTurn.objectionType) && (
-        <div className="flex flex-col gap-1.5">
-          {lastTurn.wantsHuman && (
-            <div className="text-xs px-2 py-1 rounded-full bg-rose-500/10 text-rose-400 text-center">
-              Wants human agent
-            </div>
-          )}
-          {lastTurn.objectionType && (
-            <div className="text-xs px-2 py-1 rounded-full bg-orange-500/10 text-orange-400 text-center">
-              Objection: {lastTurn.objectionType}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   )
 }

@@ -2,8 +2,11 @@ const CONFIG = {
   AGENT_NAME: "Asha",
   COMPANY_NAME: "TATA AIG Health Insurance",
   GATHER_LANGUAGE: "en-IN",
+  GROQ_MODEL: "llama-3.3-70b-versatile",
   GEMINI_MODEL: "gemini-1.5-flash",
   OPENAI_MODEL: "gpt-4o-mini",
+  ELEVENLABS_MODEL_ID: "eleven_flash_v2_5",
+  DEFAULT_VOICE_ID: "EXAVITQu4vr4xnSDxMaL", // Sarah (Warm, Professional Female)
   MAX_TURNS: 20,
   AI_TIMEOUT_MS: 10000,
   GATHER_TIMEOUT_SEC: "7",
@@ -61,16 +64,9 @@ const INTENT_TO_STAGE = {
   [INTENTS.UNKNOWN]: STAGES.INTENT_SELECTION,
 };
 
-// ---------------------------------------------------------------------------
-// TASK-BASED FIELD REQUIREMENTS
-// Each intent only asks for what it actually needs to complete ITS task.
-// This is the single source of truth for both the state machine
-// (getMissingFields) and the AI prompt (buildAshaSystemPrompt), so the two
-// can never drift apart and ask for things the flow doesn't need.
-// ---------------------------------------------------------------------------
 const INTENT_REQUIRED_FIELDS = {
   [INTENTS.BUY_POLICY]: ["age", "city", "family_members", "medical_history", "budget", "buying_timeline"],
-  [INTENTS.RENEWAL]: ["policy_number", "renewal_date"], // see getMissingFields: policy_number OR existing_insurer counts
+  [INTENTS.RENEWAL]: ["policy_number", "renewal_date"],
   [INTENTS.CLAIMS]: ["policy_number", "hospital_name"],
   [INTENTS.CASHLESS_HOSPITAL]: ["city"],
   [INTENTS.POLICY_STATUS]: ["policy_number"],
@@ -82,9 +78,6 @@ const INTENT_REQUIRED_FIELDS = {
   [INTENTS.UNKNOWN]: [],
 };
 
-// Fields required specifically to generate a BUY_POLICY quote (Problem 6:
-// recommendation used to fire on just age+family_members, producing wrong
-// plans). All of these must be present before recommendPlan() runs.
 const QUOTE_REQUIRED_FIELDS = ["age", "family_members", "medical_history", "budget"];
 
 const DTMF_INTENT_MAP = {
@@ -120,54 +113,6 @@ const LEAD_TIERS = {
   DEAD: "dead",
 };
 
-const CALL_PROFILES = {
-  [CALL_DIRECTION.INBOUND]: {
-    direction: CALL_DIRECTION.INBOUND,
-    opening: "Thank you for calling TATA AIG Health Insurance. My name is Asha. Press 1 to buy a new policy. Press 2 for renewal. Press 3 for claims. Press 4 for our cashless hospital list. Press 5 to speak with an advisor. Or just tell me what you need.",
-    requiresPermissionStep: false,
-    entryIntent: INTENTS.UNKNOWN,
-    allowedEntryIntents: "any",
-    closingByIntent: {
-      [INTENTS.BUY_POLICY]: "Great! I have scheduled your appointment. A health advisor will call you to complete your policy purchase. Thank you for calling TATA AIG, goodbye!",
-      [INTENTS.RENEWAL]: "Thank you. Your renewal process has been initiated. A direct payment link has been sent to your WhatsApp. Thank you for calling TATA AIG, goodbye!",
-      [INTENTS.CLAIMS]: "Thank you. I have recorded your claim request. Our claim guide has been sent to your WhatsApp. Thank you for calling TATA AIG, goodbye!",
-      [INTENTS.CASHLESS_HOSPITAL]: "We have sent the complete cashless hospital locator link to your WhatsApp. Thank you for calling TATA AIG, goodbye!",
-    },
-    fallbackClosing: "Thank you for calling TATA AIG Health Insurance. Goodbye!",
-    tone: "responsive, helpful, lets the caller lead",
-  },
-  [CALL_DIRECTION.OUTBOUND]: {
-    direction: CALL_DIRECTION.OUTBOUND,
-    opening: "Hello! This is Asha, your AI voice assistant from TATA AIG Health Insurance. Is now an okay time to talk regarding your health insurance?",
-    requiresPermissionStep: true,
-    entryIntent: INTENTS.BUY_POLICY,
-    allowedEntryIntents: [INTENTS.BUY_POLICY],
-    closingByIntent: {
-      [INTENTS.BUY_POLICY]: "Thank you for your time today! I have sent the recommended plan details to your WhatsApp. Have a great day!",
-    },
-    fallbackClosing: "Thanks for your time. Have a great day!",
-    tone: "proactive, respects a 'no' immediately, never pushes past a decline",
-  },
-};
-
-const ACKNOWLEDGMENT_FILLERS = [
-  "Mm-hmm — let's see...",
-  "Got it, one moment...",
-  "Understood — let me check that...",
-  "Sure thing — let me look into that..."
-];
-
-function getAcknowledgmentFiller(turnCount = 0) {
-  return ACKNOWLEDGMENT_FILLERS[turnCount % ACKNOWLEDGMENT_FILLERS.length];
-}
-
-const CANNED_FAQ_PATTERNS = [
-  { key: "tax_benefits", regex: /\b(tax|80d|deduction|save tax|section 80d)\b/i, answer: "Health insurance premiums qualify for a tax deduction under Section 80D up to ₹25,000 for yourself and up to ₹50,000 for senior citizen parents." },
-  { key: "cashless_explainer", regex: /\b(what is cashless|how cashless works|explain cashless|cashless meaning)\b/i, answer: "With cashless hospitalization, TATA AIG settles the bill directly with our 7,000+ network hospitals, so you don't have to pay out of pocket." },
-  { key: "premium_range_query", regex: /\b(starting premium|how much premium|minimum premium|average cost|price range)\b/i, answer: "Comprehensive TATA AIG health plans start from approximately ₹400 per month depending on your age, coverage, and family size." },
-  { key: "claim_process", regex: /\b(claim process|how to claim|file a claim|claim procedure)\b/i, answer: "To file a claim, notify us within 24 hours of emergency admission or 48 hours prior to planned treatment. You can submit documents on our WhatsApp or portal." },
-];
-
 const DOCUMENT_LINKS = {
   brochure: "https://your-cdn.example.com/tata-aig-health-brochure.pdf",
   cashless_locator: "https://your-cdn.example.com/cashless-hospital-locator.pdf",
@@ -190,116 +135,22 @@ const EXPLICIT_END_REGEX = /\b(bye|goodbye|that'?s all|no more questions|hang up
 const PERMISSION_DENIED_REGEX = /\b(not now|no time|can'?t talk|busy right now|call (me )?later|abhi nahi|busy hu|later)\b/i;
 const TRANSFER_KEYWORDS = ["advisor", "human", "agent", "representative", "executive", "call me", "sales person", "baat kar", "operator"];
 
-// Fast-path regexes (Problem 8): recognize identifiers the caller volunteers
-// unprompted — e.g. "my policy number is 445566" — so we never re-ask for
-// something that was already said, regardless of what the AI extracts.
 const POLICY_NUMBER_REGEX = /\bpolic(?:y|ies)?\D{0,15}?(\d{5,12})\b/i;
 const BARE_LONG_NUMBER_REGEX = /\b(\d{6,12})\b/;
 const MOBILE_REGEX = /\b([6-9]\d{9})\b/;
 
-// Buying-timeline fast-path regexes (fixes the "when are you planning to purchase" infinite loop)
 const TIMELINE_IMMEDIATE_REGEX = /\b(right now|immediately|asap|today|now|straight away|as soon as possible)\b/i;
 const TIMELINE_DAY_REGEX = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
 const TIMELINE_SOON_REGEX = /\b(this week|tomorrow|couple of days|few days|this weekend)\b/i;
 const TIMELINE_MONTH_REGEX = /\b(this month|next week|soon|shortly)\b/i;
 const TIMELINE_LATER_REGEX = /\b(next month|later|not sure yet|no rush|no hurry|still thinking|still deciding|not decided)\b/i;
 
-// Renewal-date regexes — separate from appointment_datetime so the two fields never collide.
-// Matches relative dates, named days, "DD/MM", and "15th August"-style literals.
 const RENEWAL_DATE_REGEX_NAMED_DAY = /\b(?:this\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
 const RENEWAL_DATE_REGEX_RELATIVE = /\b(today|tomorrow|next\s+(?:week|month|year)|this\s+(?:month|week|year)|end\s+of\s+(?:the\s+)?(?:month|year))\b/i;
 const RENEWAL_DATE_REGEX_DMY = /\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/;
 const RENEWAL_DATE_REGEX_LITERAL = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{2,4})?\b/i;
 
-// Explicit user decline at RECOMMENDATION / APPOINTMENT stage
 const DECLINE_REGEX = /^(no|nah|not interested|no thanks|nope|not now|maybe later|abhi nahi|nahi|don't want|dont want)\b/i;
-
-function classifyTurn(conversation, speechText) {
-  const text = (speechText || "").trim();
-  const missing = conversation.missingFields || [];
-
-  // 1. DTMF Digit
-  if (/^[1-9]$/.test(text) && (conversation.stage === STAGES.WELCOME || conversation.stage === STAGES.INTENT_SELECTION || conversation.stage === STAGES.GREETING)) {
-    return { path: "SLOT_FILL", type: "dtmf", field: "intent" };
-  }
-
-  // 2. Explicit Exit / Decline / Transfer
-  if (EXPLICIT_END_REGEX.test(text) || (conversation.stage === STAGES.PERMISSION && PERMISSION_DENIED_REGEX.test(text)) || DECLINE_REGEX.test(text)) {
-    return { path: "SLOT_FILL", type: "command", field: "exit_or_decline" };
-  }
-  if (TRANSFER_KEYWORDS.some((kw) => text.toLowerCase().includes(kw))) {
-    return { path: "SLOT_FILL", type: "command", field: "human_transfer" };
-  }
-
-  // 3. Single Pending Field Target-Scoped Match
-  if (missing.length === 1) {
-    const pending = missing[0];
-    if (pending === "age" && /\b(1[89]|[2-7]\d|80)\b/.test(text)) {
-      return { path: "SLOT_FILL", type: "field", field: "age" };
-    }
-    if (pending === "budget" && /\b(\d{1,4}\s*(?:k|lakh|lac|thousand|l|cr)|[1-9]\d{3,6})\b/i.test(text)) {
-      return { path: "SLOT_FILL", type: "field", field: "budget" };
-    }
-    if (pending === "city") {
-      const knownCities = Object.keys(CASHLESS_NETWORK);
-      const isKnownCity = knownCities.some((c) => text.toLowerCase().includes(c)) || /\b(mumbai|delhi|bangalore|bengaluru|pune|chennai|hyderabad|kolkata|ahmedabad|jaipur|lucknow|noida|gurgaon)\b/i.test(text);
-      if (isKnownCity) return { path: "SLOT_FILL", type: "field", field: "city" };
-    }
-    if (pending === "renewal_date" && extractRenewalDate(text)) {
-      return { path: "SLOT_FILL", type: "field", field: "renewal_date" };
-    }
-    if (pending === "buying_timeline" && extractBuyingTimeline(text)) {
-      return { path: "SLOT_FILL", type: "field", field: "buying_timeline" };
-    }
-    if (pending === "policy_number" && (POLICY_NUMBER_REGEX.test(text) || /\b(\d{5,12})\b/.test(text))) {
-      return { path: "SLOT_FILL", type: "field", field: "policy_number" };
-    }
-    if (pending === "family_members" && /\b(self|myself|family|spouse|wife|husband|children|kids|parents|father|mother|\d\s*member)\b/i.test(text)) {
-      return { path: "SLOT_FILL", type: "field", field: "family_members" };
-    }
-  }
-
-  // 4. Canned FAQ Match
-  for (const faq of CANNED_FAQ_PATTERNS) {
-    if (faq.regex.test(text)) {
-      return { path: "CANNED_FAQ", key: faq.key, answer: faq.answer };
-    }
-  }
-
-  // 5. Default: NEEDS_REASONING
-  return { path: "NEEDS_REASONING", reason: "complex_or_ambiguous" };
-}
-
-function updateLoopBreaker(conversation) {
-  const currentKey = `${conversation.stage}:${(conversation.missingFields || [])[0] || "none"}`;
-  if (conversation.lastStageAndPendingFieldKey === currentKey) {
-    conversation.consecutiveSameStateTurns = (conversation.consecutiveSameStateTurns || 0) + 1;
-  } else {
-    conversation.lastStageAndPendingFieldKey = currentKey;
-    conversation.consecutiveSameStateTurns = 1;
-  }
-
-  if (conversation.consecutiveSameStateTurns >= 3) {
-    conversation.stage = STAGES.HUMAN_TRANSFER;
-    conversation.transferredToHuman = true;
-    return true;
-  }
-  return false;
-}
-
-function normalizeTextForTTS(text = "") {
-  if (!text) return "";
-  let norm = String(text);
-  norm = norm.replace(/₹\s*(\d+(?:,\d+)*)/g, (match, p1) => `${p1.replace(/,/g, "")} rupees`);
-  norm = norm.replace(/(\d+)\s*(?:lakh|lakhs|lac|lacs)\b/gi, "$1 lakh");
-  norm = norm.replace(/(\d+)\s*(?:k|thousand)\b/gi, "$1 thousand");
-  norm = norm.replace(/\b80D\b/gi, "Section 80 D");
-  norm = norm.replace(/\bIRDAI\b/gi, "I R D A I");
-  norm = norm.replace(/\bTATA AIG\b/gi, "Tata A I G");
-  norm = norm.replace(/```[\s\S]*?```/g, "");
-  norm = norm.replace(/[*_~#`]/g, "");
-  return norm.trim();
-}
 
 function extractBuyingTimeline(text) {
   if (!text) return null;
@@ -315,12 +166,6 @@ function extractBuyingTimeline(text) {
   return null;
 }
 
-/**
- * extractRenewalDate: parse free-form date text into a canonical renewal date string.
- * Returns null if nothing date-like is found.
- * Kept intentionally separate from extractBuyingTimeline / appointment_datetime
- * so those two fields never clobber each other.
- */
 function extractRenewalDate(text) {
   if (!text) return null;
   const literalMatch = text.match(RENEWAL_DATE_REGEX_LITERAL);
@@ -337,29 +182,10 @@ function extractRenewalDate(text) {
   return null;
 }
 
-/**
- * fillPendingField — intent-aware pending-field capture (Fix #2).
- *
- * Runs AFTER all specific regex extractors inside runLocalExtraction() and fills
- * the ONE field the bot is currently waiting for, but only if:
- *   1. That field belongs to the ACTIVE intent's required list.
- *   2. No other extractor already produced a value for it this turn.
- *   3. The utterance is not a generic filler / negation that should NOT be
- *      stored as a real value (bare "no", single digit, "hospital", etc.).
- *
- * Currently handles:
- *   - hospital_name  (CLAIMS intent)
- *   - renewal_date   (RENEWAL intent)
- *
- * @param {object} conversation  Live conversation object with .intent and .missingFields
- * @param {string} text          Raw (sanitised) speech text for this turn
- * @param {object} extracted     Already-extracted fields object (mutated in place)
- */
 function fillPendingField(conversation, text, extracted) {
   const intentRequires = INTENT_REQUIRED_FIELDS[conversation.intent] || [];
   const missing = conversation.missingFields || [];
 
-  // ── hospital_name (CLAIMS) ───────────────────────────────────────────────
   if (
     conversation.intent === INTENTS.CLAIMS &&
     intentRequires.includes("hospital_name") &&
@@ -367,19 +193,15 @@ function fillPendingField(conversation, text, extracted) {
     !extracted.hospital_name
   ) {
     const trimmed = text.trim();
-    // Reject bare fillers: single words that are only filler/negation keywords,
-    // bare digits, or utterances that contain ONLY the word "hospital".
     const isGenericFiller = /^(no|none|not\s+sure|na|nahi|nothing|\d+)$/i.test(trimmed);
     const isKeywordOnly = /^(hospital|hospitals|cashless|network|claim|claims)$/i.test(trimmed);
     if (!isGenericFiller && !isKeywordOnly && trimmed.length > 2) {
-      // Title-case the captured value for display consistency
       extracted.hospital_name = trimmed.replace(/\w\S*/g, (w) =>
         w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
       );
     }
   }
 
-  // ── renewal_date (RENEWAL) ───────────────────────────────────────────────
   if (
     conversation.intent === INTENTS.RENEWAL &&
     intentRequires.includes("renewal_date") &&
@@ -404,6 +226,7 @@ class PerformanceTracker {
       customerLookupMs: 0,
       historyLookupMs: 0,
       promptConstructionMs: 0,
+      groqApiMs: 0,
       geminiApiMs: 0,
       openaiFallbackMs: 0,
       jsonExtractionMs: 0,
@@ -480,7 +303,7 @@ CONTEXT: Direction: ${direction} (${isOutbound ? "outbound" : "inbound"}), Stage
 FIELDS STILL NEEDED FOR THIS TASK ONLY: ${JSON.stringify(conversation.missingFields || [])}
 RULES:
 1. Reply naturally for the CURRENT stage and the CURRENT active task only.
-2. TASK SCOPE IS STRICT: never ask for a field that is not in "FIELDS STILL NEEDED FOR THIS TASK ONLY". For example, do not ask age, budget, or medical history during a renewal, claim, or hospital-search task — those only need what's listed above. Full per-intent requirement map, for reference only (do not ask outside the active intent's list): ${JSON.stringify(INTENT_REQUIRED_FIELDS)}.
+2. TASK SCOPE IS STRICT: never ask for a field that is not in "FIELDS STILL NEEDED FOR THIS TASK ONLY". For example, do not ask age, budget, or medical history during a renewal, claim, or hospital-search task — those only need what's listed above. Full per-intent requirement map, for reference only: ${JSON.stringify(INTENT_REQUIRED_FIELDS)}.
 3. If "FIELDS STILL NEEDED FOR THIS TASK ONLY" is empty, do NOT ask any further profiling question — acknowledge and move toward closing the task.
 4. If the customer already volunteered a value in their message (a policy number, city, mobile number, etc.), extract it into extractedFields even if it wasn't explicitly asked for. Never ask again for something already said.
 5. Ask for at most ONE missing field per turn, chosen from the list above.
@@ -495,7 +318,7 @@ OUTPUT FORMAT: JSON only
 function buildUserPrompt(speechResult, history) {
   let histText = "";
   if (history && history.length > 0) {
-    histText = history.slice(-4).map((h) => `${h.role === "asha" ? "Asha" : "Customer"}: ${h.text}`).join("\n");
+    histText = history.slice(-4).map((h) => `${h.role === "asha" ? "Asha" : "Customer"}: ${h.text || h.content || ""}`).join("\n");
   }
   return `Chat History:\n${histText}\nCustomer: "${speechResult}"\nAnalyze context and return JSON.`;
 }
@@ -534,10 +357,6 @@ function sanitizeSpeech(text, maxLen = 500) {
   return String(text).trim().slice(0, maxLen);
 }
 
-// Problem 8 fix: recognize policy numbers / mobile numbers a caller
-// volunteers unprompted, independent of the AI provider. Runs even when the
-// AI call times out, so the local fallback stops asking for things already
-// said.
 function extractFastPathFields(speech) {
   const fields = {};
   if (!speech) return fields;
@@ -571,27 +390,17 @@ function runLocalExtraction(speech, conversation) {
     extractedFields: {}
   };
 
-  // 1. Intent Detection
-  // NOTE: DTMF digits are always treated as intent selection and ARE allowed
-  // to overwrite the active intent (user is pressing a menu key deliberately).
-  // Keyword-based detection is restricted — see processTurn() guard (Fix #1).
   if (/^[1-9]$/.test(text)) {
     const digit = text;
     if (DTMF_INTENT_MAP[digit]) {
       result.detectedIntent = DTMF_INTENT_MAP[digit];
     }
   } else {
-    // Check keywords — these are CANDIDATES only. processTurn() decides whether
-    // to apply the detected intent based on the current conversation state.
     if (/\b(renew|renewal|expire|expiring)\b/i.test(text)) {
       result.detectedIntent = INTENTS.RENEWAL;
     } else if (/\b(claim|claims|bills|reimburse|reimbursement)\b/i.test(text)) {
       result.detectedIntent = INTENTS.CLAIMS;
     } else if (/\b(hospital|hospitals|cashless|network)\b/i.test(text)) {
-      // ⚠️  "hospital" keyword alone does NOT override an active CLAIMS intent
-      // because mid-claim the customer names the treating hospital. Guard in
-      // processTurn() handles this — we still surface the candidate for
-      // WELCOME / INTENT_SELECTION stages.
       result.detectedIntent = INTENTS.CASHLESS_HOSPITAL;
     } else if (/\b(advisor|agent|representative|human|talk to|connect me|speak to)\b/i.test(text)) {
       result.detectedIntent = INTENTS.TALK_TO_ADVISOR;
@@ -602,7 +411,6 @@ function runLocalExtraction(speech, conversation) {
     }
   }
 
-  // 2. Policy Number Extraction
   const explicitPolicy = text.match(POLICY_NUMBER_REGEX);
   if (explicitPolicy) {
     result.extractedFields.policy_number = explicitPolicy[1];
@@ -614,7 +422,6 @@ function runLocalExtraction(speech, conversation) {
     if (bare) result.extractedFields.policy_number = bare[1];
   }
 
-  // 3. Budget Extraction
   const budgetMatch = text.match(/\b(\d+)\s*(?:k|thousand|lakhs?|lakh|hazoo?r|hazar)?\s*(?:of\s*)?budget\b/i) || 
                       text.match(/\b(\d+)\s*(k|thousand|lakhs?|lakh|hazoo?r|hazar)\b/i) ||
                       text.match(/\bbudget\D{0,10}?(\d+(?:\s*(?:k|thousand|lakhs?|lakh|hazoo?r|hazar))?)\b/i) ||
@@ -623,13 +430,11 @@ function runLocalExtraction(speech, conversation) {
     result.extractedFields.budget = budgetMatch[0].trim();
   }
 
-  // Strip budget pattern before doing age check, to avoid extracting age from e.g. "20" of "20k"
   let textForAge = text;
   if (budgetMatch) {
     textForAge = text.replace(budgetMatch[0], "");
   }
 
-  // 4. Age Extraction
   const ageMatch = textForAge.match(/\b(?:age\D{0,10}?|i\s+am\s+|aged\s+)?([1-8][0-9])\s*(?:years?|yrs|yr|year\s+old)?\b/i);
   if (ageMatch) {
     const val = parseInt(ageMatch[1], 10);
@@ -649,7 +454,6 @@ function runLocalExtraction(speech, conversation) {
     }
   }
 
-  // 5. Family Members Extraction
   const familyNumMatch = text.match(/\b(?:family\s+of\s+)?([2-9])\s*(?:members?|people|persons)?\b/i) ||
                          text.match(/\b([2-9])\s*(?:family\s+members?|members?)\b/i);
   if (familyNumMatch) {
@@ -664,7 +468,6 @@ function runLocalExtraction(speech, conversation) {
     result.extractedFields.family_members = 1;
   }
 
-  // 6. City Extraction
   const CITIES = [
     "mumbai", "delhi", "bangalore", "bengaluru", "pune", "chennai", "hyderabad", "kolkata",
     "ahmedabad", "jaipur", "surat", "lucknow", "kanpur", "nagpur", "indore", "thane", "bhopal",
@@ -679,13 +482,11 @@ function runLocalExtraction(speech, conversation) {
     result.extractedFields.city = city.charAt(0).toUpperCase() + city.slice(1).toLowerCase();
   }
 
-  // 6.5 Buying Timeline Extraction
   const timeline = extractBuyingTimeline(text);
   if (timeline) {
     result.extractedFields.buying_timeline = timeline;
   }
 
-  // 7. Medical History Extraction
   const isDirectNo = (lower === "no" || lower === "no.") && conversation && conversation.lastQuestion && conversation.lastQuestion.toLowerCase().includes("medical");
   if (/\b(no disease|no history|no illness|none|nil|nothing|no health issue|no medical history|no issues|healthy|fit)\b/i.test(text) || isDirectNo) {
     result.extractedFields.medical_history = "None";
@@ -701,7 +502,7 @@ function runLocalExtraction(speech, conversation) {
       result.extractedFields.medical_history = found.join(", ");
     }
   }
-  // 8. Appointment Datetime Extraction
+
   const isYesToAppointment = conversation && (conversation.stage === STAGES.RECOMMENDATION || conversation.stage === STAGES.APPOINTMENT) &&
     (/^(yes|sure|ok|okay|yeah|yep|yup|haan|han|schedule|book|yes please|sure thing|connect me|please do|yeah yeah|yes yes)$/i.test(lower) || 
      lower.includes("yes") || lower.includes("sure") || lower.includes("book") || lower.includes("schedule") || lower.includes("appointment"));
@@ -715,9 +516,6 @@ function runLocalExtraction(speech, conversation) {
     }
   }
 
-  // 9. Pending-field capture (Fix #2): fills hospital_name and renewal_date
-  // based on the single field the conversation is currently waiting on.
-  // Runs AFTER all regex extractors so it only fires when they produced nothing.
   if (conversation) {
     fillPendingField(conversation, text, result.extractedFields);
   }
@@ -730,8 +528,6 @@ function hasUsefulLocalInfo(localExtracted) {
     return true;
   }
   const fields = localExtracted.extractedFields || {};
-  // Fix #3: include hospital_name and renewal_date so that fillPendingField()
-  // results count as "useful" and skip the AI fallback path.
   const strongFields = [
     "age", "budget", "city", "family_members", "policy_number",
     "buying_timeline", "medical_history", "appointment_datetime",
@@ -856,20 +652,12 @@ function escapeXml(str = "") {
     .replace(/'/g, "&apos;");
 }
 
-function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Aditi", numDigits = null, env = null }) {
-  const origin = actionUrl ? new URL(actionUrl).origin : "";
-  const useEleven = !!(env?.ELEVENLABS_API_KEY);
-  const audioUrl = `${origin}/api/tts?text=${encodeURIComponent(text)}`;
-
-  const promptXml = useEleven
-    ? `<Play>${escapeXml(audioUrl)}</Play>`
-    : `<Say voice="${voice}">${escapeXml(text)}</Say>`;
-
+function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Aditi", numDigits = null }) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="speech dtmf" action="${escapeXml(actionUrl)}" method="POST"
           language="${language}" speechTimeout="auto" speechModel="experimental" enhanced="true" timeout="${CONFIG.GATHER_TIMEOUT_SEC}"${numDigits ? ` numDigits="${numDigits}" finishOnKey=""` : ""}>
-    ${promptXml}
+    <Say voice="${voice}">${escapeXml(text)}</Say>
   </Gather>
   <Say voice="${voice}">Sorry, I didn't hear you clearly.</Say>
   <Redirect method="POST">${escapeXml(actionUrl.replace("/voice/gather", "/voice/fallback"))}</Redirect>
@@ -877,29 +665,19 @@ function sayAndGather({ text, actionUrl, language = "en-IN", voice = "Polly.Adit
   return new Response(xml, { headers: { "Content-Type": "text/xml" } });
 }
 
-function sayAndHangup({ text, voice = "Polly.Aditi", env = null, origin = "" }) {
-  let promptXml = `<Say voice="${voice}">${escapeXml(text)}</Say>`;
-  if (env?.ELEVENLABS_API_KEY && origin) {
-    const audioUrl = `${origin}/api/tts?text=${encodeURIComponent(text)}`;
-    promptXml = `<Play>${escapeXml(audioUrl)}</Play>`;
-  }
+function sayAndHangup({ text, voice = "Polly.Aditi" }) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  ${promptXml}
+  <Say voice="${voice}">${escapeXml(text)}</Say>
   <Hangup/>
 </Response>`;
   return new Response(xml, { headers: { "Content-Type": "text/xml" } });
 }
 
-function sayAndDial({ text, dialNumber, voice = "Polly.Aditi", env = null, origin = "" }) {
-  let promptXml = `<Say voice="${voice}">${escapeXml(text)}</Say>`;
-  if (env?.ELEVENLABS_API_KEY && origin) {
-    const audioUrl = `${origin}/api/tts?text=${encodeURIComponent(text)}`;
-    promptXml = `<Play>${escapeXml(audioUrl)}</Play>`;
-  }
+function sayAndDial({ text, dialNumber, voice = "Polly.Aditi" }) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  ${promptXml}
+  <Say voice="${voice}">${escapeXml(text)}</Say>
   <Dial>${escapeXml(dialNumber)}</Dial>
 </Response>`;
   return new Response(xml, { headers: { "Content-Type": "text/xml" } });
@@ -950,13 +728,6 @@ function requireTwilioSignature(handler) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Task-aware missing-field resolution (Problems 1, 2, 3, 4, 12).
-// Each intent has its own required-field list (INTENT_REQUIRED_FIELDS).
-// RENEWAL gets a small custom rule: a policy number OR an existing-insurer
-// name identifies the policy, so only one of the two is required — not both,
-// and never age/budget/medical history.
-// ---------------------------------------------------------------------------
 function getMissingFields(customer, intent) {
   const activeIntent = intent || INTENTS.UNKNOWN;
 
@@ -1164,12 +935,6 @@ async function pushToSheets(env, row, tracker) {
   return tracker ? tracker.measureAsync("sheetsRequestMs", runReq) : runReq();
 }
 
-// ---------------------------------------------------------------------------
-// State machine (Problems 2, 4, 7): every inbound intent now has its own
-// completion condition instead of funnelling through one generic PROFILING
-// state. A task's stage only moves to CLOSING once ITS OWN missingFields
-// list (computed per-intent above) is empty.
-// ---------------------------------------------------------------------------
 function computeNextStage(conversation, aiResult, speechResult) {
   const { stage, direction, missingFields, objectionCount, quote, turnCount, intent } = conversation;
 
@@ -1177,8 +942,6 @@ function computeNextStage(conversation, aiResult, speechResult) {
   if (aiResult.wantsHuman) return STAGES.HUMAN_TRANSFER;
   if (EXPLICIT_END_REGEX.test(speechResult)) return STAGES.CLOSING;
 
-  // Fix #6: explicit decline at RECOMMENDATION / APPOINTMENT → close gracefully
-  // rather than loop back to the plan pitch or keep asking for appointment time.
   const speechLower = (speechResult || "").toLowerCase().trim();
   if (
     (stage === STAGES.RECOMMENDATION || stage === STAGES.APPOINTMENT) &&
@@ -1199,8 +962,6 @@ function computeNextStage(conversation, aiResult, speechResult) {
       case STAGES.PROFILING:
         return missingFields.length === 0 ? STAGES.RECOMMENDATION : STAGES.PROFILING;
       case STAGES.RECOMMENDATION:
-        // Fix #5: check appointment_datetime FIRST so the "yes" that books the
-        // appointment immediately closes on the same turn instead of one turn late.
         if (aiResult.extractedFields && aiResult.extractedFields.appointment_datetime) return STAGES.CLOSING;
         if (aiResult.objectionType) return STAGES.OBJECTION_HANDLING;
         return STAGES.APPOINTMENT;
@@ -1208,7 +969,6 @@ function computeNextStage(conversation, aiResult, speechResult) {
         if (objectionCount + (aiResult.objectionType ? 1 : 0) >= CONFIG.MAX_OBJECTIONS) return STAGES.CLOSING;
         return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
       case STAGES.APPOINTMENT:
-        // Fix #5: same fast-path for the APPOINTMENT stage itself.
         return aiResult.extractedFields && aiResult.extractedFields.appointment_datetime ? STAGES.CLOSING : STAGES.APPOINTMENT;
       case STAGES.CLOSING:
         return STAGES.ENDED;
@@ -1217,8 +977,6 @@ function computeNextStage(conversation, aiResult, speechResult) {
     }
   }
 
-  // INBOUND: task-based branching. Once intent is known, each branch is
-  // independent and only asks for its own required fields.
   switch (stage) {
     case STAGES.WELCOME:
     case STAGES.INTENT_SELECTION: {
@@ -1232,7 +990,6 @@ function computeNextStage(conversation, aiResult, speechResult) {
       return STAGES.RECOMMENDATION;
 
     case STAGES.RECOMMENDATION:
-      // Fix #5: appointment_datetime present → skip APPOINTMENT stage, close immediately.
       if (aiResult.extractedFields && aiResult.extractedFields.appointment_datetime) return STAGES.CLOSING;
       if (aiResult.objectionType) return STAGES.OBJECTION_HANDLING;
       return STAGES.APPOINTMENT;
@@ -1242,12 +999,8 @@ function computeNextStage(conversation, aiResult, speechResult) {
       return aiResult.objectionType ? STAGES.OBJECTION_HANDLING : STAGES.APPOINTMENT;
 
     case STAGES.APPOINTMENT:
-      // Fix #5: same fast-path.
       return aiResult.extractedFields && aiResult.extractedFields.appointment_datetime ? STAGES.CLOSING : STAGES.APPOINTMENT;
 
-    // Task-complete-and-close branches (Problem 7): renewal, claims, and
-    // hospital search each end the moment their own small field list is
-    // satisfied — they never fall through to profiling/recommendation.
     case STAGES.RENEWAL:
       return missingFields.length === 0 ? STAGES.CLOSING : STAGES.RENEWAL;
 
@@ -1357,6 +1110,67 @@ function recommendPlan(customer) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// AI COMPLETIONS PROVIDERS (Groq AI Primary -> Gemini -> OpenAI Fallback)
+// ---------------------------------------------------------------------------
+
+async function callGroq(env, prompt, systemPrompt = "", tracker) {
+  const apiKey = env.GROQ_API_KEY;
+  if (!apiKey) {
+    const err = new Error("GROQ_API_KEY is not configured in Worker environment secrets.");
+    if (tracker) tracker.aiTrace.thrownException = err.message;
+    throw err;
+  }
+
+  const model = env.GROQ_MODEL || CONFIG.GROQ_MODEL || "llama-3.3-70b-versatile";
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+
+  if (tracker) {
+    tracker.aiTrace.providerSelected = "groq";
+    tracker.aiTrace.modelName = model;
+    tracker.aiTrace.requestUrl = url;
+  }
+
+  const messages = [];
+  if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
+  messages.push({ role: "user", content: prompt });
+
+  const t0 = Date.now();
+  const exec = async () => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        response_format: { type: "json_object" },
+        temperature: 0.3,
+        max_tokens: 500,
+      }),
+    });
+
+    if (tracker) {
+      tracker.aiTrace.httpStatus = resp.status;
+      tracker.aiTrace.latencyMs = Date.now() - t0;
+    }
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      if (tracker) tracker.aiTrace.responseBodySnippet = errText.slice(0, 300);
+      throw new Error(`Groq API error ${resp.status}: ${errText}`);
+    }
+    const data = await resp.json();
+    const rawText = data?.choices?.[0]?.message?.content ?? "";
+    if (tracker) tracker.aiTrace.responseBodySnippet = rawText.slice(0, 300);
+    return rawText;
+  };
+
+  return tracker ? tracker.measureAsync("groqApiMs", exec) : exec();
+}
+
 async function callGemini(env, prompt, systemPrompt = "", tracker) {
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -1456,11 +1270,12 @@ async function callOpenAI(env, prompt, systemPrompt = "", tracker) {
 }
 
 async function generateAIResponse(env, prompt, systemPrompt = "", tracker) {
+  let groqErr = null;
   let geminiErr = null;
   let openAiErr = null;
 
-  if (!env.GEMINI_API_KEY && !env.OPENAI_API_KEY) {
-    const msg = "MISSING_KEYS: Neither GEMINI_API_KEY nor OPENAI_API_KEY is configured in Cloudflare Worker environment variables/secrets.";
+  if (!env.GROQ_API_KEY && !env.GEMINI_API_KEY && !env.OPENAI_API_KEY) {
+    const msg = "MISSING_KEYS: Neither GROQ_API_KEY, GEMINI_API_KEY, nor OPENAI_API_KEY is configured in Cloudflare Worker environment variables/secrets.";
     if (tracker) {
       tracker.aiTrace.thrownException = msg;
       tracker.aiTrace.fallbackReason = msg;
@@ -1469,16 +1284,29 @@ async function generateAIResponse(env, prompt, systemPrompt = "", tracker) {
     throw new Error(msg);
   }
 
+  // 1. Try Groq AI (Primary)
+  try {
+    if (env.GROQ_API_KEY) {
+      return await callGroq(env, prompt, systemPrompt, tracker);
+    }
+  } catch (err) {
+    groqErr = err.message;
+    if (tracker) tracker.aiTrace.thrownException = `Groq Exception: ${err.message}`;
+    log.warn("Groq AI fetch failed, attempting Gemini fallback", { error: err.message });
+  }
+
+  // 2. Try Gemini AI (Fallback 1)
   try {
     if (env.GEMINI_API_KEY) {
       return await callGemini(env, prompt, systemPrompt, tracker);
     }
   } catch (err) {
     geminiErr = err.message;
-    if (tracker) tracker.aiTrace.thrownException = `Gemini Exception: ${err.message}`;
-    log.warn("Gemini AI fetch failed, attempting OpenAI fallback", { error: err.message, stack: err.stack });
+    if (tracker) tracker.aiTrace.thrownException += ` | Gemini Exception: ${err.message}`;
+    log.warn("Gemini AI fetch failed, attempting OpenAI fallback", { error: err.message });
   }
 
+  // 3. Try OpenAI (Fallback 2)
   try {
     if (env.OPENAI_API_KEY) {
       return await callOpenAI(env, prompt, systemPrompt, tracker);
@@ -1486,10 +1314,10 @@ async function generateAIResponse(env, prompt, systemPrompt = "", tracker) {
   } catch (err) {
     openAiErr = err.message;
     if (tracker) tracker.aiTrace.thrownException += ` | OpenAI Exception: ${err.message}`;
-    log.error("OpenAI fallback failed as well", { error: err.message, stack: err.stack });
+    log.error("OpenAI fallback failed as well", { error: err.message });
   }
 
-  const combinedErr = `All AI providers failed. Gemini: ${geminiErr || "not configured"}, OpenAI: ${openAiErr || "not configured"}`;
+  const combinedErr = `All AI providers failed. Groq: ${groqErr || "not configured"}, Gemini: ${geminiErr || "not configured"}, OpenAI: ${openAiErr || "not configured"}`;
   if (tracker) tracker.aiTrace.fallbackReason = combinedErr;
   throw new Error(combinedErr);
 }
@@ -1532,7 +1360,6 @@ function validateResponse(reply) {
 function getLocalFallbackResponse(speech, stage) {
   const lower = (speech || "").toLowerCase().trim();
 
-  // Affirmative responses ("yes", "haan", "sure", "ok", "speaking")
   if (/^(yes|yeah|yep|haan|han|sure|ok|okay|speaking|correct|right|sahi|ha|true)$/i.test(lower) || lower.includes("yes") || lower.includes("haan") || lower.includes("speaking")) {
     if (stage === STAGES.GREETING || stage === STAGES.PERMISSION || stage === STAGES.WELCOME) {
       return "Great! How can I help you today? You can ask about buying a new health plan, policy renewal, cashless claims, or network hospitals.";
@@ -1543,42 +1370,34 @@ function getLocalFallbackResponse(speech, stage) {
     return "Great! How can I assist you with your TATA AIG Health Insurance policy today?";
   }
 
-  // Greetings ("hello", "hi", "hey", "namaste")
   if (/^(hello|hi|hey|namaste|hullo)$/i.test(lower)) {
     return "Hello! I am Asha from TATA AIG Health Insurance. Are you looking to buy a new policy, renew existing cover, or file a claim?";
   }
 
-  // Intent: Buy policy
   if (lower.includes("buy") || lower.includes("new") || lower.includes("purchase") || lower.includes("plan") || lower.includes("policy") || lower.includes("1")) {
     return "Wonderful! Let's find the right health plan for you. Could you tell me your age and current city?";
   }
 
-  // Intent: Renewal
   if (lower.includes("renew") || lower.includes("renewal") || lower.includes("expire") || lower.includes("2")) {
     return "Sure! Please share your existing TATA AIG policy number or registered mobile number to proceed with renewal.";
   }
 
-  // Intent: Claims
   if (lower.includes("claim") || lower.includes("bills") || lower.includes("reimburse") || lower.includes("3")) {
     return "For claim support, you can file cashless claims directly at any of our 7,000+ network hospitals, or submit bills for reimbursement. Would you like our claim guide on WhatsApp?";
   }
 
-  // Intent: Cashless / Hospital
   if (lower.includes("hospital") || lower.includes("cashless") || lower.includes("network") || lower.includes("4")) {
     return "Our cashless network includes over 7,000 top hospitals across India, including Lilavati in Mumbai and Max in Delhi. Which city are you located in?";
   }
 
-  // Intent: Human / Advisor
   if (lower.includes("human") || lower.includes("agent") || lower.includes("advisor") || lower.includes("representative") || lower.includes("5")) {
     return "I am connecting you to a human health insurance advisor right away. Please stay on the line.";
   }
 
-  // Intent: Premium / Price
   if (lower.includes("price") || lower.includes("cost") || lower.includes("premium") || lower.includes("expensive") || lower.includes("rate")) {
     return "TATA AIG health plans start from approx ₹8,000/year for individuals and ₹15,000/year for families depending on age and sum insured.";
   }
 
-  // Default natural conversational prompt
   return "Thank you! To help you best, are you looking to buy a new health policy, renew an existing plan, or get help with cashless claims?";
 }
 
@@ -1596,7 +1415,6 @@ function buildLocalFallbackResult(conversation, speechResult, tracker, reason, s
     spokenResponse = getLocalFallbackResponse(speechResult, conversation.stage);
   }
 
-  // Loop/Reprompt prevention check: If repeating the same prompt, prepend a natural clarification
   if (conversation.lastQuestion && (spokenResponse === conversation.lastQuestion || spokenResponse.includes(conversation.lastQuestion))) {
     const repromptPrefixes = [
       "Sorry, I didn't quite catch that. ",
@@ -1704,11 +1522,7 @@ async function dbUpdateCustomer(db, phone, customerData, tracker) {
     budget: customerData.budget || null,
     buying_timeline: customerData.buying_timeline || null,
   };
-  // NOTE: policy_number, hospital_name, insured_person, and
-  // registered_mobile are intentionally NOT persisted here — they are new
-  // in-session fields (see buildInitialConversation) and the customers
-  // table schema wasn't extended for them. Add matching columns and include
-  // them above if they should survive across calls.
+
   const entries = Object.entries(allFields).filter(([, v]) => v !== null);
   if (entries.length === 0) return;
 
@@ -1866,47 +1680,48 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     }
   }
 
-  // 1. Upfront Turn Classification (<5ms)
-  const route = classifyTurn(conversation, speechResult);
-  if (tracker) {
-    tracker.routeTrace = route;
+  const fastFields = extractFastPathFields(speechResult);
+  for (const [key, value] of Object.entries(fastFields)) {
+    if (value !== null && value !== undefined && value !== "") {
+      conversation.customer[key] = value;
+    }
   }
-  log.info("Turn classified", { route, speechResult, turnCount: conversation.turnCount });
 
-  // Recompute missing fields first before extraction decisions
-  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
+  const speechLower = speechResult.toLowerCase();
+  const matchedTransferKeyword = TRANSFER_KEYWORDS.find((k) => speechLower.includes(k));
 
-  // Check 3-turn repeat loop breaker
-  const isStuck = updateLoopBreaker(conversation);
-  if (isStuck) {
-    const replyText = "I want to make sure this gets sorted properly — let me connect you with a specialist who can help directly.";
+  if (matchedTransferKeyword) {
+    conversation.stage = STAGES.HUMAN_TRANSFER;
+    conversation.transferredToHuman = true;
+    const replyText = "Sure, let me connect you to a human advisor now. Please hold.";
     conversation.history.push({ role: "asha", text: replyText });
+
     if (env.DB) {
       try {
         await env.DB.prepare("UPDATE voice_calls SET stage = ?, session_data = ? WHERE call_sid = ?").bind(conversation.stage, JSON.stringify(conversation), callSid).run();
         await dbLogConversationTurn(env.DB, callSid, "asha", replyText, STAGES.HUMAN_TRANSFER, tracker);
       } catch (e) {
-        log.error("D1 loop breaker transfer save error", { error: e.message });
+        log.error("D1 transfer save error", { error: e.message });
       }
     }
+
     return {
       conversation,
       replyText,
-      isEnding: false,
+      isEnding: true,
       wantsHuman: true,
       aiResult: null,
-      handledBy: "SLOT_FILL",
-      routeTrace: route,
+      handledBy: "local_rules",
       usedAI: false,
       aiProvider: "none",
       aiLatencyMs: 0,
-      fallbackReason: "Loop breaker triggered after 3 repeated states",
+      fallbackReason: null,
       extractedByLocal: {},
       extractedByGemini: {}
     };
   }
 
-  let handledBy = route.path;
+  let handledBy = "local_rules";
   let usedAI = false;
   let aiProvider = "none";
   let aiLatencyMs = 0;
@@ -1916,27 +1731,31 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   let aiResult = null;
   let replyText = "";
 
-  if (route.path === "SLOT_FILL") {
-    // -----------------------------------------------------------------------
-    // PATH 1: SLOT_FILL (Deterministic 0ms Code Path)
-    // -----------------------------------------------------------------------
-    const localExtracted = runLocalExtraction(speechResult, conversation);
+  const localExtracted = runLocalExtraction(speechResult, conversation);
+
+  const isIntentSelectionPhase =
+    conversation.intent === INTENTS.UNKNOWN ||
+    conversation.stage === STAGES.WELCOME ||
+    conversation.stage === STAGES.INTENT_SELECTION;
+
+  if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
+    if (isIntentSelectionPhase) {
+      conversation.intent = localExtracted.detectedIntent;
+    }
+  }
+
+  for (const [key, value] of Object.entries(localExtracted.extractedFields)) {
+    if (value !== null && value !== undefined && value !== "") {
+      conversation.customer[key] = value;
+    }
+  }
+  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
+
+  const hasUsefulInfo = hasUsefulLocalInfo(localExtracted);
+
+  if (hasUsefulInfo) {
     extractedByLocal = localExtracted.extractedFields;
 
-    if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
-      if (conversation.intent === INTENTS.UNKNOWN || conversation.stage === STAGES.WELCOME || conversation.stage === STAGES.INTENT_SELECTION) {
-        conversation.intent = localExtracted.detectedIntent;
-      }
-    }
-
-    for (const [key, value] of Object.entries(extractedByLocal)) {
-      if (value !== null && value !== undefined && value !== "") {
-        conversation.customer[key] = value;
-      }
-    }
-    conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
-
-    // Compute Quote if required fields present
     const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
       const val = conversation.customer[key];
       return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
@@ -1946,6 +1765,17 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
       conversation.quote = tracker
         ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
         : recommendPlan(conversation.customer);
+      if (env.DB && callRow && callRow.customer_id) {
+        try {
+          await tracker.measureAsync("dbWritesMs", async () => {
+            await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
+              .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
+              .run();
+          });
+        } catch (e) {
+          log.error("D1 quote save error", { error: e.message });
+        }
+      }
     }
 
     conversation.stage = tracker
@@ -1962,21 +1792,12 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
 
     replyText = generateLocalResponse(conversation);
 
-  } else if (route.path === "CANNED_FAQ") {
-    // -----------------------------------------------------------------------
-    // PATH 2: CANNED_FAQ (Pre-cached zero-AI lookup)
-    // -----------------------------------------------------------------------
-    replyText = route.answer;
-
   } else {
-    // -----------------------------------------------------------------------
-    // PATH 3: NEEDS_REASONING (Gemini Escalation with Function Calling)
-    // -----------------------------------------------------------------------
-    handledBy = "NEEDS_REASONING";
+    handledBy = env.GROQ_API_KEY ? "groq" : (env.GEMINI_API_KEY ? "gemini" : "openai");
     usedAI = true;
-    aiProvider = env.GEMINI_API_KEY ? "gemini" : (env.OPENAI_API_KEY ? "openai" : "none");
+    aiProvider = env.GROQ_API_KEY ? "groq" : (env.GEMINI_API_KEY ? "gemini" : (env.OPENAI_API_KEY ? "openai" : "none"));
+    fallbackReason = "Local rules found no useful fields or intents";
 
-    const filler = getAcknowledgmentFiller(conversation.turnCount);
     const aiStart = Date.now();
     aiResult = await getTurnResponse(env, conversation, speechResult, tracker);
     aiLatencyMs = Date.now() - aiStart;
@@ -1987,6 +1808,7 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
       if (aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN) {
         conversation.intent = aiResult.detectedIntent;
       }
+      
       for (const [key, value] of Object.entries(extractedByGemini)) {
         if (value !== null && value !== undefined && value !== "") {
           conversation.customer[key] = value;
@@ -2004,6 +1826,17 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
         conversation.quote = tracker
           ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
           : recommendPlan(conversation.customer);
+        if (env.DB && callRow && callRow.customer_id) {
+          try {
+            await tracker.measureAsync("dbWritesMs", async () => {
+              await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
+                .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
+                .run();
+            });
+          } catch (e) {
+            log.error("D1 quote save error", { error: e.message });
+          }
+        }
       }
 
       if (aiResult.callSummary) conversation.summary = aiResult.callSummary;
@@ -2013,14 +1846,12 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
         ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, aiResult, speechResult))
         : computeNextStage(conversation, aiResult, speechResult);
 
-      const spokenResponseText = aiResult.spokenResponse || generateLocalResponse(conversation);
-      replyText = `${filler} ${spokenResponseText}`;
+      replyText = aiResult.spokenResponse;
     } else {
-      replyText = `${filler} I want to make sure I get your requirements right. Could you tell me a bit more?`;
+      replyText = "I'm sorry, I'm having trouble processing that right now. Could you repeat?";
     }
   }
 
-  // Appointment save logic
   const appointmentDatetime = (extractedByLocal.appointment_datetime || (aiResult && aiResult.extractedFields && aiResult.extractedFields.appointment_datetime));
   if (appointmentDatetime && !conversation.appointmentBooked) {
     conversation.appointmentBooked = true;
@@ -2030,7 +1861,6 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     }
   }
 
-  // Update DB Customer details
   if (env.DB) {
     try {
       await dbUpdateCustomer(env.DB, conversation.customer.phone, conversation.customer, tracker);
@@ -2039,9 +1869,6 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     }
   }
 
-  // Fix #4: Repeat-question breaker.
-  // Track how many consecutive turns Asha has asked the SAME question.
-  // On the 3rd identical question in a row, transfer to human instead of looping.
   if (conversation.lastQuestion && replyText === conversation.lastQuestion) {
     conversation.repeatCount = (conversation.repeatCount || 0) + 1;
   } else {
@@ -2049,7 +1876,6 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   }
 
   if (conversation.repeatCount >= 2) {
-    // Bot has been stuck on the same question 3 times — hand off gracefully.
     replyText = "I want to make sure this gets sorted properly — let me connect you with a specialist who can help directly.";
     conversation.stage = STAGES.HUMAN_TRANSFER;
     conversation.transferredToHuman = true;
@@ -2089,12 +1915,10 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
 }
 
 function buildInitialConversation(direction, phone, customer) {
-  const profile = CALL_PROFILES[direction] || CALL_PROFILES[CALL_DIRECTION.INBOUND];
-  const initialIntent = profile.entryIntent || INTENTS.UNKNOWN;
+  const initialIntent = direction === CALL_DIRECTION.OUTBOUND ? INTENTS.BUY_POLICY : INTENTS.UNKNOWN;
   const missingFields = getMissingFields(customer, initialIntent);
   return {
     direction,
-    profileKey: profile.direction,
     intent: initialIntent,
     history: [],
     customer: {
@@ -2117,8 +1941,6 @@ function buildInitialConversation(direction, phone, customer) {
     lastQuestion: "",
     stage: direction === CALL_DIRECTION.OUTBOUND ? STAGES.GREETING : STAGES.WELCOME,
     objectionCount: 0,
-    consecutiveSameStateTurns: 0,
-    lastStageAndPendingFieldKey: "",
     quote: null,
     whatsappSent: false,
     transferredToHuman: false,
@@ -2128,8 +1950,9 @@ function buildInitialConversation(direction, phone, customer) {
 }
 
 function buildGreeting(direction) {
-  const profile = CALL_PROFILES[direction] || CALL_PROFILES[CALL_DIRECTION.INBOUND];
-  return profile.opening;
+  return direction === CALL_DIRECTION.OUTBOUND
+    ? "Hello! This is Asha, your AI voice assistant from TATA AIG Health Insurance. Am I speaking with the right person regarding your health insurance needs?"
+    : "Thank you for calling TATA AIG Health Insurance. My name is Asha. Press 1 to buy a new policy. Press 2 for renewal. Press 3 for claims. Press 4 for our cashless hospital list. Press 5 to speak with an advisor. Or just tell me what you need.";
 }
 
 async function handleDashboard(request, env) {
@@ -2420,11 +2243,11 @@ async function handleEnhancedHealth(request, env, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const result = {
     worker: "ok",
-    version: "3.0.0",
+    version: "3.1.0",
     agent: env.AGENT_NAME || CONFIG.AGENT_NAME,
-    model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
+    model: env.GROQ_MODEL || CONFIG.GROQ_MODEL,
     environment: env.ENVIRONMENT || "production",
-    services: { db: "unknown", gemini: "unknown" },
+    services: { db: "unknown", groq: "unknown", gemini: "unknown", elevenlabs: "unknown" },
     latencyMs: 0,
   };
   if (env.DB) {
@@ -2437,6 +2260,8 @@ async function handleEnhancedHealth(request, env, tracker) {
   } else {
     result.services.db = "not_bound";
   }
+  result.services.groq = env.GROQ_API_KEY ? "configured" : "not_configured";
+  result.services.elevenlabs = env.ELEVENLABS_API_KEY ? "configured" : "not_configured";
   result.services.gemini = env.GEMINI_API_KEY ? "configured" : "not_configured";
   if (env.OPENAI_API_KEY) result.services.openai = "configured";
   if (env.TWILIO_ACCOUNT_SID) result.services.twilio = "configured";
@@ -2474,6 +2299,8 @@ async function handleApiStatus(request, env, tracker) {
       activeSessions,
       totalCustomers,
       db: dbStatus,
+      groq: env.GROQ_API_KEY ? "configured" : "missing",
+      elevenlabs: env.ELEVENLABS_API_KEY ? "configured" : "missing",
       gemini: env.GEMINI_API_KEY ? "configured" : "missing",
       openai: env.OPENAI_API_KEY ? "configured" : "not_set",
       whatsapp: env.WHATSAPP_TOKEN ? "configured" : "not_set",
@@ -2492,7 +2319,7 @@ function handleApiConfig(request, env, tracker) {
     {
       agentName: env.AGENT_NAME || CONFIG.AGENT_NAME,
       companyName: env.COMPANY_NAME || CONFIG.COMPANY_NAME,
-      model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
+      model: env.GROQ_MODEL || CONFIG.GROQ_MODEL,
       language: env.GATHER_LANGUAGE || CONFIG.GATHER_LANGUAGE,
       stages: Object.values(STAGES),
       intents: Object.values(INTENTS),
@@ -2738,6 +2565,9 @@ function handleDebugRoutes(request, env, tracker) {
       routes: [
         "GET /",
         "GET /health",
+        "POST /chat",
+        "GET /tts",
+        "GET /voices",
         "GET /api/health",
         "GET /api/status",
         "GET /api/config",
@@ -2775,7 +2605,10 @@ function handleDebugEnv(request, env, tracker) {
       AGENT_NAME: env.AGENT_NAME,
       COMPANY_NAME: env.COMPANY_NAME,
       GATHER_LANGUAGE: env.GATHER_LANGUAGE,
+      GROQ_MODEL: env.GROQ_MODEL || CONFIG.GROQ_MODEL,
       GEMINI_MODEL: env.GEMINI_MODEL,
+      hasGroqKey: !!env.GROQ_API_KEY,
+      hasElevenLabsKey: !!env.ELEVENLABS_API_KEY,
       hasGeminiKey: !!env.GEMINI_API_KEY,
       hasOpenAIKey: !!env.OPENAI_API_KEY,
       hasTwilio: !!env.TWILIO_ACCOUNT_SID,
@@ -2789,8 +2622,6 @@ function handleDebugEnv(request, env, tracker) {
     tracker
   );
 }
-
-
 
 function corsHeaders(origin) {
   return {
@@ -2815,65 +2646,130 @@ function jsonResponse(data, status = 200, reqOrigin, tracker) {
   return new Response(JSON.stringify(data), { status, headers });
 }
 
-async function handleElevenLabsTTS(request, env, tracker) {
+// ---------------------------------------------------------------------------
+// NEW CLEAN BROWSER MVP HANDLERS: /chat, /tts, /voices
+// ---------------------------------------------------------------------------
+
+async function handleChatEndpoint(request, env, tracker) {
+  const reqOrigin = request.headers.get("Origin") || "*";
+  let body = {};
+  try {
+    body = await tracker.measureAsync("requestParsingMs", () => request.json());
+  } catch {}
+
+  const userText = body.text || "";
+  const history = Array.isArray(body.history) ? body.history : [];
+
+  const conversationState = {
+    direction: CALL_DIRECTION.INBOUND,
+    intent: INTENTS.UNKNOWN,
+    stage: STAGES.WELCOME,
+    history,
+    customer: {},
+    missingFields: [],
+  };
+
+  const aiResult = await getTurnResponse(env, conversationState, userText, tracker);
+
+  return jsonResponse(
+    {
+      reply: aiResult.spokenResponse || "Hello! How can I assist you with TATA AIG health insurance today?",
+      intent: aiResult.detectedIntent || "general_inquiry",
+      action: aiResult.action || "NONE",
+    },
+    200,
+    reqOrigin,
+    tracker
+  );
+}
+
+async function handleTtsEndpoint(request, env) {
   const reqOrigin = request.headers.get("Origin") || "*";
   const url = new URL(request.url);
-  const rawText = url.searchParams.get("text");
+  const textParam = url.searchParams.get("text") || "";
+  const cleanText = textParam.trim().replace(/\s+/g, " ");
 
-  if (!rawText) {
-    return jsonResponse({ error: "Missing text parameter" }, 400, reqOrigin, tracker);
-  }
-
-  const text = normalizeTextForTTS(rawText);
-  const apiKey = env.ELEVENLABS_API_KEY;
-  if (!apiKey) {
-    log.warn("ElevenLabs TTS requested but ELEVENLABS_API_KEY is not configured");
-    return jsonResponse({ error: "ElevenLabs API Key not configured" }, 500, reqOrigin, tracker);
-  }
-
-  const voiceId = env.ELEVENLABS_VOICE_ID || "21m00Tcm4TlvDq8ikWAM";
-  const modelId = env.ELEVENLABS_MODEL_REALTIME || env.ELEVENLABS_MODEL || "eleven_flash_v2_5";
-  const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?optimize_streaming_latency=3`;
-
-  try {
-    const response = await fetch(ttsUrl, {
-      method: "POST",
-      headers: {
-        "xi-api-key": apiKey,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg"
-      },
-      body: JSON.stringify({
-        text: text,
-        model_id: modelId,
-        voice_settings: {
-          stability: 0.35,
-          similarity_boost: 0.8,
-          style: 0.25,
-          use_speaker_boost: true
-        }
-      })
+  if (!cleanText) {
+    return new Response(JSON.stringify({ error: "Text parameter is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(reqOrigin) },
     });
+  }
 
-    if (!response.ok) {
-      const errText = await response.text();
-      log.error("ElevenLabs API error response", { status: response.status, error: errText });
-      return jsonResponse({ error: "ElevenLabs TTS generation failed", details: errText }, 500, reqOrigin, tracker);
+  const apiKey = env.ELEVENLABS_API_KEY;
+  const requestedVoice = url.searchParams.get("voice_id") || url.searchParams.get("voice");
+  const voiceId = requestedVoice || env.ELEVENLABS_VOICE_ID || CONFIG.DEFAULT_VOICE_ID;
+  const requestedModel = url.searchParams.get("model_id") || url.searchParams.get("model");
+  const primaryModel = requestedModel || env.ELEVENLABS_MODEL_ID || CONFIG.ELEVENLABS_MODEL_ID;
+
+  if (!apiKey) {
+    return new Response(
+      JSON.stringify({ error: "ELEVENLABS_API_KEY is not configured in worker environment." }),
+      { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders(reqOrigin) } }
+    );
+  }
+
+  const modelsToTry = [primaryModel, "eleven_multilingual_v2", "eleven_turbo_v2", "eleven_monolingual_v1"];
+  let lastErrorText = "";
+
+  for (const modelId of modelsToTry) {
+    const elevenLabsRes = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": apiKey,
+          Accept: "audio/mpeg",
+        },
+        body: JSON.stringify({
+          text: cleanText,
+          model_id: modelId,
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+          },
+        }),
+      }
+    );
+
+    if (elevenLabsRes.ok) {
+      return new Response(elevenLabsRes.body, {
+        status: 200,
+        headers: {
+          "Content-Type": "audio/mpeg",
+          "Transfer-Encoding": "chunked",
+          ...corsHeaders(reqOrigin),
+        },
+      });
     }
 
-    return new Response(response.body, {
-      status: 200,
-      headers: {
-        "Content-Type": "audio/mpeg",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Cache-Control": "public, max-age=86400"
-      }
-    });
-  } catch (err) {
-    log.error("ElevenLabs TTS fetch error", { error: err.message, stack: err.stack });
-    return jsonResponse({ error: "TTS fetch error", details: err.message }, 500, reqOrigin, tracker);
+    lastErrorText = await elevenLabsRes.text();
   }
+
+  return new Response(JSON.stringify({ error: `ElevenLabs API Error: ${lastErrorText}` }), {
+    status: 500,
+    headers: { "Content-Type": "application/json", ...corsHeaders(reqOrigin) },
+  });
+}
+
+async function handleVoicesEndpoint(request, env) {
+  const reqOrigin = request.headers.get("Origin") || "*";
+  const apiKey = env.ELEVENLABS_API_KEY;
+  if (!apiKey) {
+    return new Response(JSON.stringify({ error: "ELEVENLABS_API_KEY missing" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json", ...corsHeaders(reqOrigin) },
+    });
+  }
+  const res = await fetch("https://api.elevenlabs.io/v1/voices", {
+    headers: { "xi-api-key": apiKey },
+  });
+  const data = await res.json();
+  return new Response(JSON.stringify(data), {
+    status: res.status,
+    headers: { "Content-Type": "application/json", ...corsHeaders(reqOrigin) },
+  });
 }
 
 async function handleBrowserSession(request, env, ctx, tracker) {
@@ -2920,7 +2816,7 @@ async function handleBrowserSession(request, env, ctx, tracker) {
       direction,
       customer: conversation.customer,
       missingFields: conversation.missingFields,
-      model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
+      model: env.GROQ_MODEL || CONFIG.GROQ_MODEL,
     },
     200,
     reqOrigin,
@@ -3012,7 +2908,7 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
         summary: conversation.summary,
         turnCount: conversation.turnCount,
         latencyMs: metrics.totalRequestMs,
-        model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
+        model: env.GROQ_MODEL || CONFIG.GROQ_MODEL,
         timings: metrics,
         aiTrace: tracker.aiTrace,
         handledBy: "local_rules",
@@ -3066,7 +2962,7 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
       summary: conversation.summary,
       turnCount: conversation.turnCount,
       latencyMs: metrics.totalRequestMs,
-      model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL,
+      model: env.GROQ_MODEL || CONFIG.GROQ_MODEL,
       timings: metrics,
       aiTrace: tracker.aiTrace,
       handledBy,
@@ -3243,6 +3139,7 @@ export default {
   async fetch(request, env, ctx) {
     const tracker = new PerformanceTracker();
     const url = new URL(request.url);
+    const pathname = url.pathname.replace(/\/$/, '') || '/';
     const method = request.method;
     const reqOrigin = request.headers.get("Origin") || "*";
 
@@ -3251,37 +3148,50 @@ export default {
     }
 
     try {
-      if (url.pathname === "/") return await handleDashboard(request, env);
-      if (url.pathname === "/health") {
-        return jsonResponse({ status: "ok", agent: env.AGENT_NAME || CONFIG.AGENT_NAME, model: env.GEMINI_MODEL || CONFIG.GEMINI_MODEL }, 200, reqOrigin, tracker);
+      if (pathname === "" || pathname === "/") return await handleDashboard(request, env);
+
+      // Clean Browser MVP endpoints
+      if (pathname === "/chat" || pathname === "/api/chat") {
+        if (method === "POST") return await handleChatEndpoint(request, env, tracker);
       }
-      if (url.pathname === "/test-call" && method === "POST") return await handleTestCall(request, env);
+      if (pathname === "/tts" || pathname === "/api/tts") {
+        if (method === "GET") return await handleTtsEndpoint(request, env);
+      }
+      if (pathname === "/voices" || pathname === "/api/voices") {
+        if (method === "GET") return await handleVoicesEndpoint(request, env);
+      }
 
-      if (url.pathname === "/voice/incoming" && method === "POST") return await routeCallIncoming(request, env, ctx, tracker);
-      if (url.pathname === "/voice/gather" && method === "POST") return await routeCallGather(request, env, ctx, tracker);
-      if (url.pathname === "/voice/status" && method === "POST") return await handleCallStatus(request, env, ctx, tracker);
-      if (url.pathname === "/voice/fallback" && method === "POST") return await handleCallFallback(request, env, ctx, tracker);
+      // Health endpoints
+      if (pathname === "/health") {
+        return jsonResponse({ status: "ok", agent: env.AGENT_NAME || CONFIG.AGENT_NAME, model: env.GROQ_MODEL || CONFIG.GROQ_MODEL }, 200, reqOrigin, tracker);
+      }
+      if (pathname === "/api/health" && method === "GET") return await handleEnhancedHealth(request, env, tracker);
 
-      if (url.pathname === "/whatsapp/webhook") return new Response("OK", { status: 200 });
+      // Twilio routes
+      if (pathname === "/test-call" && method === "POST") return await handleTestCall(request, env);
+      if (pathname === "/voice/incoming" && method === "POST") return await routeCallIncoming(request, env, ctx, tracker);
+      if (pathname === "/voice/gather" && method === "POST") return await routeCallGather(request, env, ctx, tracker);
+      if (pathname === "/voice/status" && method === "POST") return await handleCallStatus(request, env, ctx, tracker);
+      if (pathname === "/voice/fallback" && method === "POST") return await handleCallFallback(request, env, ctx, tracker);
+      if (pathname === "/whatsapp/webhook") return new Response("OK", { status: 200 });
 
-      if (url.pathname === "/voice/browser-session" && method === "POST") return await handleBrowserSession(request, env, ctx, tracker);
-      if (url.pathname === "/voice/browser-turn" && method === "POST") return await handleBrowserTurn(request, env, ctx, tracker);
+      // Browser Turn/Session routes
+      if (pathname === "/voice/browser-session" && method === "POST") return await handleBrowserSession(request, env, ctx, tracker);
+      if (pathname === "/voice/browser-turn" && method === "POST") return await handleBrowserTurn(request, env, ctx, tracker);
 
-      if (url.pathname.startsWith("/api/db/") && method === "GET") return await handleApiDb(request, env, tracker);
-      if (url.pathname === "/api/tts" && (method === "GET" || method === "POST")) return await handleElevenLabsTTS(request, env, tracker);
-      if (url.pathname === "/api/health" && method === "GET") return await handleEnhancedHealth(request, env, tracker);
-      if (url.pathname === "/api/status" && method === "GET") return await handleApiStatus(request, env, tracker);
-      if (url.pathname === "/api/config" && method === "GET") return handleApiConfig(request, env, tracker);
-      if (url.pathname === "/api/session/end" && method === "POST") return await handleApiSessionEnd(request, env, tracker);
-      if (url.pathname === "/api/session/clear" && method === "POST") return await handleApiSessionClear(request, env, tracker);
-      if (url.pathname.startsWith("/api/session/") && method === "GET") return await handleApiSessionGet(request, env, tracker);
-      if (url.pathname.startsWith("/api/customer/") && method === "GET") return await handleApiCustomerGet(request, env, tracker);
-      if (url.pathname.startsWith("/api/history/") && method === "GET") return await handleApiHistory(request, env, tracker);
-      if (url.pathname === "/api/analytics" && method === "GET") return await handleApiAnalytics(request, env, tracker);
-      if (url.pathname === "/api/feedback" && method === "POST") return await handleApiFeedback(request, env, tracker);
-      if (url.pathname === "/api/debug/routes" && method === "GET") return handleDebugRoutes(request, env, tracker);
-      if (url.pathname === "/api/debug/env" && method === "GET") return handleDebugEnv(request, env, tracker);
-
+      // API routes
+      if (pathname.startsWith("/api/db/") && method === "GET") return await handleApiDb(request, env, tracker);
+      if (pathname === "/api/status" && method === "GET") return await handleApiStatus(request, env, tracker);
+      if (pathname === "/api/config" && method === "GET") return handleApiConfig(request, env, tracker);
+      if (pathname === "/api/session/end" && method === "POST") return await handleApiSessionEnd(request, env, tracker);
+      if (pathname === "/api/session/clear" && method === "POST") return await handleApiSessionClear(request, env, tracker);
+      if (pathname.startsWith("/api/session/") && method === "GET") return await handleApiSessionGet(request, env, tracker);
+      if (pathname.startsWith("/api/customer/") && method === "GET") return await handleApiCustomerGet(request, env, tracker);
+      if (pathname.startsWith("/api/history/") && method === "GET") return await handleApiHistory(request, env, tracker);
+      if (pathname === "/api/analytics" && method === "GET") return await handleApiAnalytics(request, env, tracker);
+      if (pathname === "/api/feedback" && method === "POST") return await handleApiFeedback(request, env, tracker);
+      if (pathname === "/api/debug/routes" && method === "GET") return handleDebugRoutes(request, env, tracker);
+      if (pathname === "/api/debug/env" && method === "GET") return handleDebugEnv(request, env, tracker);
 
       return jsonResponse({ error: "Not Found", path: url.pathname }, 404, reqOrigin, tracker);
     } catch (err) {

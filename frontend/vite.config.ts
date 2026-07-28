@@ -19,10 +19,9 @@ export default defineConfig({
     open: true,
     proxy: {
       '/health': { target: WORKER_URL, changeOrigin: true, secure: true },
-      '/voice': { target: WORKER_URL, changeOrigin: true, secure: true },
+      '/chat': { target: WORKER_URL, changeOrigin: true, secure: true },
+      '/tts': { target: WORKER_URL, changeOrigin: true, secure: true },
       '/api': { target: WORKER_URL, changeOrigin: true, secure: true },
-      '/test-call': { target: WORKER_URL, changeOrigin: true, secure: true },
     },
   },
 })
-

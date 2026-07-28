@@ -21,67 +21,10 @@ export function useSpeech(): SpeechHook {
   const recognitionRef = useRef<SpeechRecognition | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const isSpeakingRef = useRef<boolean>(false)
-  const hasSpokenRef = useRef<boolean>(false)
+  const lastTranscriptRef = useRef<string>('')
   const settings = useSettingsStore()
 
   const isSupported = !!SR
-
-  const stopListening = useCallback(() => {
-    try {
-      recognitionRef.current?.stop()
-    } catch {}
-    recognitionRef.current = null
-  }, [])
-
-  const startListening = useCallback((onTranscript: TranscriptCallback, onSilence?: () => void) => {
-    if (!SR) {
-      toast.error('Speech recognition is not supported in this browser.')
-      return
-    }
-    if (isSpeakingRef.current) {
-      // Pause mic start while assistant is speaking to avoid echo self-triggering
-      return
-    }
-    stopListening()
-    hasSpokenRef.current = false
-
-    try {
-      const recognition = new SR()
-      recognition.lang = settings.speechLang
-      recognition.continuous = false
-      recognition.interimResults = true
-      recognition.maxAlternatives = 1
-
-      recognition.onresult = (event) => {
-        const result = event.results[event.results.length - 1]
-        const transcript = result[0].transcript.trim()
-        const confidence = result[0].confidence || 1
-        const isFinal = result.isFinal
-        if (transcript) {
-          if (isFinal) hasSpokenRef.current = true
-          onTranscript(transcript, isFinal, confidence)
-        }
-      }
-
-      recognition.onerror = (event) => {
-        if (event.error !== 'no-speech' && event.error !== 'aborted') {
-          toast.error(`Speech recognition error: ${event.error}`)
-        }
-      }
-
-      recognition.onend = () => {
-        recognitionRef.current = null
-        if (!hasSpokenRef.current) {
-          onSilence?.()
-        }
-      }
-
-      recognitionRef.current = recognition
-      recognition.start()
-    } catch (e) {
-      logError('Speech recognition start failed', e)
-    }
-  }, [settings.speechLang, stopListening])
 
   const stopSpeaking = useCallback(() => {
     isSpeakingRef.current = false
@@ -97,24 +40,94 @@ export function useSpeech(): SpeechHook {
     }
   }, [])
 
+  const stopListening = useCallback(() => {
+    try {
+      recognitionRef.current?.stop()
+    } catch {}
+    recognitionRef.current = null
+  }, [])
+
+  const startListening = useCallback((onTranscript: TranscriptCallback, onSilence?: () => void) => {
+    if (!SR) {
+      toast.error('Speech recognition is not supported in this browser. Please use Chrome/Edge.')
+      return
+    }
+
+    // Force stop previous speech synthesis / audio stream so listening can begin
+    stopSpeaking()
+    stopListening()
+    lastTranscriptRef.current = ''
+
+    try {
+      const recognition = new SR()
+      recognition.lang = settings.speechLang || 'en-IN'
+      recognition.continuous = false
+      recognition.interimResults = true
+      recognition.maxAlternatives = 1
+
+      recognition.onresult = (event) => {
+        let interim = ''
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript.trim()
+          const confidence = event.results[i][0].confidence || 1
+          const isFinal = event.results[i].isFinal
+          if (transcript) {
+            lastTranscriptRef.current = transcript
+            if (isFinal) {
+              onTranscript(transcript, true, confidence)
+            } else {
+              interim = transcript
+              onTranscript(transcript, false, confidence)
+            }
+          }
+        }
+      }
+
+      recognition.onerror = (event) => {
+        if (event.error === 'not-allowed') {
+          toast.error('Microphone access blocked. Please allow microphone permission in your browser address bar.')
+        } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
+          console.warn('Speech recognition notice:', event.error)
+        }
+      }
+
+      recognition.onend = () => {
+        recognitionRef.current = null
+        // If user spoke something before onend fired without explicit isFinal flag, trigger with last known transcript
+        if (lastTranscriptRef.current) {
+          const finalSpeech = lastTranscriptRef.current
+          lastTranscriptRef.current = ''
+          onTranscript(finalSpeech, true, 1.0)
+        } else {
+          onSilence?.()
+        }
+      }
+
+      recognitionRef.current = recognition
+      recognition.start()
+    } catch (e) {
+      console.error('Speech recognition start failed:', e)
+    }
+  }, [settings.speechLang, stopListening, stopSpeaking])
+
   const speakNative = useCallback((text: string, onEnd?: () => void) => {
     if (!window.speechSynthesis) {
       isSpeakingRef.current = false
       onEnd?.()
       return
     }
+
+    try {
+      window.speechSynthesis.cancel()
+    } catch {}
+
     const utterance = new SpeechSynthesisUtterance(text)
-    utterance.rate = settings.ttsRate
-    utterance.pitch = settings.ttsPitch
-    utterance.lang = settings.speechLang
+    utterance.lang = settings.speechLang || 'en-IN'
 
-    if (settings.ttsVoice) {
-      const voices = window.speechSynthesis.getVoices()
-      const voice = voices.find((v) => v.name === settings.ttsVoice)
-      if (voice) utterance.voice = voice
-    }
-
+    let endedHandled = false
     const wrapEnd = () => {
+      if (endedHandled) return
+      endedHandled = true
       isSpeakingRef.current = false
       onEnd?.()
     }
@@ -123,40 +136,41 @@ export function useSpeech(): SpeechHook {
     utterance.onerror = wrapEnd
     isSpeakingRef.current = true
     window.speechSynthesis.speak(utterance)
-  }, [settings.ttsRate, settings.ttsPitch, settings.speechLang, settings.ttsVoice])
+  }, [settings.speechLang])
 
   const speak = useCallback((text: string, onEnd?: () => void) => {
     stopSpeaking()
     isSpeakingRef.current = true
 
-    // Always use the real worker URL for TTS audio (not the Vite proxy)
     const workerUrl = getWorkerBaseUrl()
-    const ttsAudioUrl = `${workerUrl}/api/tts?text=${encodeURIComponent(text)}`
+    const ttsAudioUrl = `${workerUrl}/tts?text=${encodeURIComponent(text)}`
     const audio = new Audio(ttsAudioUrl)
     audioRef.current = audio
 
-    let endedHandled = false
+    let endedOrFailed = false
+
     const handleEnd = () => {
-      if (endedHandled) return
-      endedHandled = true
+      if (endedOrFailed) return
+      endedOrFailed = true
       audioRef.current = null
       isSpeakingRef.current = false
       onEnd?.()
     }
 
-    audio.onended = handleEnd
-    audio.onerror = () => {
-      logError('ElevenLabs audio error, falling back to native TTS', null)
+    const triggerFallback = () => {
+      if (endedOrFailed) return
+      endedOrFailed = true
+      audioRef.current = null
       speakNative(text, onEnd)
     }
 
-    audio.play().catch((err) => {
-      logError('ElevenLabs audio play failed, falling back to native TTS', err)
-      speakNative(text, onEnd)
+    audio.onended = handleEnd
+    audio.onerror = () => triggerFallback()
+
+    audio.play().catch(() => {
+      triggerFallback()
     })
   }, [stopSpeaking, speakNative])
 
   return { startListening, stopListening, speak, stopSpeaking, isSupported }
 }
-
-function logError(_msg: string, _err: unknown) {}
