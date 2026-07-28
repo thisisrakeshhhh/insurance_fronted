@@ -319,7 +319,7 @@ OUTPUT FORMAT: JSON only
 function buildUserPrompt(speechResult, history) {
   let histText = "";
   if (history && history.length > 0) {
-    histText = history.slice(-4).map((h) => `${h.role === "asha" ? "Asha" : "Customer"}: ${h.text || h.content || ""}`).join("\n");
+    histText = history.slice(-8).map((h) => `${h.role === "asha" ? "Asha" : "Customer"}: ${h.text || h.content || ""}`).join("\n");
   }
   return `Chat History:\n${histText}\nCustomer: "${speechResult}"\nAnalyze context and return JSON.`;
 }
@@ -526,23 +526,12 @@ function runLocalExtraction(speech, conversation) {
 
 function hasUsefulLocalInfo(localExtracted, speechText = "") {
   const trimmed = (speechText || "").trim();
+  // Only use static local template response for single-digit DTMF keypresses (e.g. "1", "2")
   if (/^[1-9]$/.test(trimmed)) {
     return true;
   }
-  const words = trimmed.split(/\s+/).filter(Boolean);
-  if (words.length > 4) {
-    return false;
-  }
-  if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
-    return true;
-  }
-  const fields = localExtracted.extractedFields || {};
-  const strongFields = [
-    "age", "budget", "city", "family_members", "policy_number",
-    "buying_timeline", "medical_history", "appointment_datetime",
-    "hospital_name", "renewal_date"
-  ];
-  return strongFields.some(f => fields[f] !== null && fields[f] !== undefined && fields[f] !== "");
+  // All conversational speech and text turns must go through Groq AI
+  return false;
 }
 
 function generateLocalResponse(conversation) {
