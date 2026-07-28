@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { startBrowserSession, sendBrowserTurn } from '@/api/worker'
+import { sendChat, type ChatContractResponse } from '@/api/worker'
 import { useVoiceStore, useSettingsStore } from '@/store'
 import { useSpeech } from './useSpeech'
 import type { Message, TurnResponse } from '@/types'
@@ -9,55 +9,16 @@ function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 }
 
-export interface OutboundLead {
-  name: string
-  phone: string
-  age: number
-  city: string
-  existing_insurer?: string
-  renewal_date?: string
-  policy_number?: string
-  notes?: string
-}
-
-export const PRESET_OUTBOUND_LEADS: OutboundLead[] = [
-  {
-    name: 'Rakesh Kumar',
-    phone: '+919876543210',
-    age: 32,
-    city: 'Mumbai',
-    existing_insurer: 'TATA AIG Health',
-    renewal_date: '15th August',
-    policy_number: 'POL-882194',
-    notes: 'Medicare Family Floater renewal due soon',
-  },
-  {
-    name: 'Anita Sharma',
-    phone: '+919812345678',
-    age: 45,
-    city: 'Delhi',
-    existing_insurer: 'Star Health',
-    renewal_date: '1st September',
-    policy_number: 'POL-441029',
-    notes: 'Porting inquiry to TATA AIG Senior Citizen cover',
-  },
-  {
-    name: 'Vikram Patel',
-    phone: '+919711223344',
-    age: 28,
-    city: 'Pune',
-    existing_insurer: 'None',
-    notes: 'New family insurance lead requested callback',
-  },
-]
-
 export function useVoiceSession() {
   const store = useVoiceStore()
   const settings = useSettingsStore()
   const speech = useSpeech()
+  
   const listeningRef = useRef(false)
-  const [callDirection, setCallDirection] = useState<'inbound' | 'outbound'>('inbound')
-  const [selectedLead, setSelectedLead] = useState<OutboundLead>(PRESET_OUTBOUND_LEADS[0])
+  const sessionIdRef = useRef<string | null>(null)
+  const [isTyping, setIsTyping] = useState(false)
+  const [wantsHumanBanner, setWantsHumanBanner] = useState(false)
+  const [isEnded, setIsEnded] = useState(false)
 
   const addMsg = useCallback(
     (role: Message['role'], text: string, extras: Partial<Message> = {}) => {
@@ -68,54 +29,89 @@ export function useVoiceSession() {
 
   const sendTurn = useCallback(
     async (text: string) => {
+      if (isEnded) return
       listeningRef.current = false
       speech.stopListening()
       speech.stopSpeaking()
 
       addMsg('customer', text)
       store.setStatus('thinking')
+      setIsTyping(true)
 
-      const activeSessionId = useVoiceStore.getState().sessionId || `browser-${Date.now()}`
+      const activeSessionId = sessionIdRef.current || store.sessionId
 
       try {
-        const turn: TurnResponse = await sendBrowserTurn(activeSessionId, text)
-        store.setLastTurn(turn)
-        store.setLastLatencyMs(turn.latencyMs)
-        store.setCurrentStage(turn.intent)
+        const res: ChatContractResponse = await sendChat(activeSessionId, text)
+        
+        // Persist sessionId across the whole session
+        sessionIdRef.current = res.sessionId
+        store.setSessionId(res.sessionId)
+        
+        setIsTyping(false)
 
-        addMsg('asha', turn.reply, {
-          latencyMs: turn.latencyMs,
-          intent: turn.intent,
-          action: turn.action,
+        const turnObj: TurnResponse = {
+          reply: res.reply,
+          intent: res.intent || 'buy_policy',
+          action: res.stage,
+          latencyMs: res.latencyMs || 0,
+          customer: res.customer,
+          missingFields: res.missingFields,
+          quote: res.quote,
+          stage: res.stage,
+          wantsHuman: res.wantsHuman,
+          ended: res.ended,
+        }
+
+        store.setLastTurn(turnObj)
+        if (res.latencyMs) store.setLastLatencyMs(res.latencyMs)
+        if (res.stage) store.setCurrentStage(res.stage)
+
+        addMsg('asha', res.reply, {
+          latencyMs: res.latencyMs,
+          intent: res.intent,
+          action: res.stage,
         })
+
+        if (res.wantsHuman) {
+          setWantsHumanBanner(true)
+        }
+
+        if (res.ended) {
+          setIsEnded(true)
+          store.setStatus('idle')
+          toast.info('Call has completed. Thank you!')
+          return
+        }
 
         if (settings.autoSpeak) {
           store.setStatus('speaking')
-          speech.speak(turn.reply, () => {
-            if (settings.continuousListening) {
+          speech.speak(res.reply, () => {
+            if (settings.continuousListening && !res.ended) {
               startListeningLoop()
             } else {
               store.setStatus('idle')
             }
           })
         } else {
-          if (settings.continuousListening) {
+          if (settings.continuousListening && !res.ended) {
             startListeningLoop()
           } else {
             store.setStatus('idle')
           }
         }
       } catch (err) {
+        setIsTyping(false)
         const msg = err instanceof Error ? err.message : 'Unknown error'
         toast.error(`Chat error: ${msg}`)
         store.setStatus('error')
         addMsg('system', `Error: ${msg}`)
       }
     },
-    [store, settings, speech, addMsg]
+    [store, settings, speech, addMsg, isEnded]
   )
 
   const startListeningLoop = useCallback(() => {
+    if (isEnded) return
     listeningRef.current = true
     store.setStatus('listening')
 
@@ -127,43 +123,57 @@ export function useVoiceSession() {
         await sendTurn(text)
       },
       () => {
-        if (listeningRef.current && useVoiceStore.getState().status === 'listening') {
+        if (listeningRef.current && useVoiceStore.getState().status === 'listening' && !isEnded) {
           setTimeout(() => {
             startListeningLoop()
           }, 300)
         }
       }
     )
-  }, [store, speech, sendTurn])
+  }, [store, speech, sendTurn, isEnded])
 
   const startSession = useCallback(async () => {
     store.resetSession()
+    sessionIdRef.current = null
+    setIsEnded(false)
+    setWantsHumanBanner(false)
+    setIsTyping(true)
+    store.setStatus('thinking')
 
-    const customerPayload = callDirection === 'outbound' ? selectedLead : { phone: '+916000000000' }
-    const sessionRes = await startBrowserSession(callDirection, customerPayload.phone, customerPayload)
+    try {
+      // First call to /chat with empty sessionId to initialize backend conversation state
+      const res: ChatContractResponse = await sendChat(null, '')
+      
+      sessionIdRef.current = res.sessionId
+      store.setSessionId(res.sessionId)
+      store.setSessionStartTime(Date.now())
+      store.setCurrentStage(res.stage)
+      setIsTyping(false)
 
-    store.setSessionId(sessionRes.sessionId)
-    store.setSessionStartTime(Date.now())
-    store.setCurrentStage(sessionRes.stage)
+      const greeting = res.reply || 'Hello! Welcome to TATA AIG Health Insurance. How can I help you today?'
+      addMsg('asha', greeting)
 
-    const greeting = sessionRes.greeting
-    addMsg('asha', greeting)
-
-    if (settings.autoSpeak) {
-      store.setStatus('speaking')
-      speech.speak(greeting, () => {
+      if (settings.autoSpeak) {
+        store.setStatus('speaking')
+        speech.speak(greeting, () => {
+          startListeningLoop()
+        })
+      } else {
         startListeningLoop()
-      })
-    } else {
-      startListeningLoop()
+      }
+    } catch (e) {
+      setIsTyping(false)
+      store.setStatus('error')
+      toast.error('Failed to initialize session with backend.')
     }
-  }, [store, settings, speech, addMsg, startListeningLoop, callDirection, selectedLead])
+  }, [store, settings, speech, addMsg, startListeningLoop])
 
   const stopSession = useCallback(() => {
     listeningRef.current = false
     speech.stopListening()
     speech.stopSpeaking()
     store.setStatus('idle')
+    setIsEnded(true)
   }, [speech, store])
 
   const startManualListening = useCallback(() => {
@@ -172,22 +182,13 @@ export function useVoiceSession() {
     startListeningLoop()
   }, [speech, startListeningLoop])
 
-  const toggleMute = useCallback(() => {
-    store.setMuted(!store.isMuted)
-    if (!store.isMuted) {
-      speech.stopSpeaking()
-    }
-  }, [store, speech])
-
   return {
     startSession,
     stopSession,
     sendTurn,
     startManualListening,
-    toggleMute,
-    callDirection,
-    setCallDirection,
-    selectedLead,
-    setSelectedLead,
+    isTyping,
+    wantsHumanBanner,
+    isEnded,
   }
 }

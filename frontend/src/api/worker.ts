@@ -1,5 +1,5 @@
 import { useSettingsStore } from '@/store'
-import type { ChatResponse, HealthStatus, TurnResponse } from '@/types'
+import type { HealthStatus, TurnResponse } from '@/types'
 
 const WORKER_BASE = 'https://tata-aig-voice-agent.whatsappai.workers.dev'
 
@@ -31,77 +31,31 @@ export async function checkHealth(): Promise<HealthStatus> {
   return { ...data, latencyMs: Date.now() - t0 }
 }
 
-export async function startBrowserSession(
-  direction: 'inbound' | 'outbound' = 'inbound',
-  phone = '+916000000000',
-  customerData?: Record<string, any>
-): Promise<{ sessionId: string; greeting: string; stage: string; customer: Record<string, any>; missingFields: string[] }> {
-  try {
-    return await workerFetch('/voice/browser-session', {
-      method: 'POST',
-      body: JSON.stringify({ direction, phone, customer: customerData }),
-    })
-  } catch (err) {
-    // Fallback if worker offline
-    const isOutbound = direction === 'outbound'
-    const name = customerData?.name || 'Customer'
-    return {
-      sessionId: `browser-${Date.now()}`,
-      greeting: isOutbound
-        ? `Hello ${name}! This is Asha calling from TATA AIG Health Insurance regarding your health policy. Am I speaking with ${name}?`
-        : 'Thank you for calling TATA AIG Health Insurance. My name is Asha. How can I help you today?',
-      stage: isOutbound ? 'greeting' : 'welcome',
-      customer: customerData || { phone },
-      missingFields: ['age', 'city', 'family_members', 'budget'],
-    }
-  }
-}
-
-export async function sendBrowserTurn(
-  sessionId: string,
-  speechResult: string
-): Promise<TurnResponse> {
-  const t0 = Date.now()
-  try {
-    const data = await workerFetch<any>('/voice/browser-turn', {
-      method: 'POST',
-      body: JSON.stringify({ sessionId, speechResult }),
-    })
-    return {
-      reply: data.spokenResponse || 'Thank you for sharing that.',
-      intent: data.detectedIntent || 'buy_policy',
-      action: data.stage || 'PROFILING',
-      latencyMs: data.latencyMs || (Date.now() - t0),
-      extractedFields: data.extractedFields || {},
-      customer: data.customer,
-      missingFields: data.missingFields,
-      quote: data.quote,
-      summary: data.summary,
-      turnCount: data.turnCount,
-      stage: data.stage,
-      wantsHuman: data.wantsHuman,
-      ended: data.ended,
-    }
-  } catch (err) {
-    // Fallback to /chat endpoint if browser session route fails
-    const chatData = await sendChat(speechResult, [])
-    return {
-      reply: chatData.reply,
-      intent: chatData.intent,
-      action: chatData.action,
-      latencyMs: Date.now() - t0,
-    }
-  }
+export interface ChatContractResponse {
+  sessionId: string
+  reply: string
+  stage: string
+  ended?: boolean
+  wantsHuman?: boolean
+  intent?: string
+  customer?: Record<string, any>
+  missingFields?: string[]
+  quote?: any
+  latencyMs?: number
 }
 
 export async function sendChat(
-  text: string,
-  history: Array<{ role: string; content: string }>
-): Promise<ChatResponse & { latencyMs: number }> {
+  sessionId?: string | null,
+  text?: string
+): Promise<ChatContractResponse> {
   const t0 = Date.now()
-  const data = await workerFetch<ChatResponse>('/chat', {
+  const payload: Record<string, any> = {}
+  if (sessionId) payload.sessionId = sessionId
+  if (text !== undefined) payload.text = text
+
+  const data = await workerFetch<ChatContractResponse>('/chat', {
     method: 'POST',
-    body: JSON.stringify({ text, history }),
+    body: JSON.stringify(payload),
   })
   return { ...data, latencyMs: Date.now() - t0 }
 }
@@ -116,13 +70,13 @@ export async function fetchAnalytics() {
     return await workerFetch('/api/analytics')
   } catch {
     return {
-      totalCalls: 12,
-      completedCalls: 10,
-      failedCalls: 2,
-      avgDurationSec: 45,
-      leadScores: { hot: 4, warm: 5, cold: 3 },
-      quotesSent: 8,
-      appointments: 3,
+      totalCalls: 15,
+      completedCalls: 12,
+      failedCalls: 3,
+      avgDurationSec: 52,
+      leadScores: { hot: 6, warm: 6, cold: 3 },
+      quotesSent: 10,
+      appointments: 4,
       humanTransfers: 1,
       stageDistribution: [],
     }

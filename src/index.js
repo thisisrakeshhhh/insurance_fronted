@@ -311,6 +311,7 @@ RULES:
 7. If intentConfidence for a newly detected intent is below 0.6, phrase spokenResponse as a brief one-line confirmation of the intent rather than proceeding into task questions.
 8. CRITICAL: spokenResponse MUST be 1-2 short friendly sentences. NO JSON or code in spokenResponse.
 ${isTaskKnown ? "" : "9. No task has been identified yet — gently ask what the customer needs (buy a policy, renew, claim, find a hospital, or speak to an advisor)."}
+10. Vary your sentence structure and vocabulary naturally turn to turn. NEVER repeat identical phrasing or question templates from earlier in the chat history, even when asking about the same missing field or intent.
 OUTPUT FORMAT: JSON only
 {"extractedFields":{"name":null,"email":null,"age":null,"city":null,"pincode":null,"family_members":null,"existing_insurer":null,"renewal_date":null,"medical_history":null,"budget":null,"buying_timeline":null,"appointment_datetime":null,"policy_number":null,"hospital_name":null,"insured_person":null},"detectedIntent":"buy_policy","intentConfidence":0.9,"objectionType":null,"wantsHuman":false,"spokenResponse":"text","callSummary":"summary"}`;
 }
@@ -523,7 +524,15 @@ function runLocalExtraction(speech, conversation) {
   return result;
 }
 
-function hasUsefulLocalInfo(localExtracted) {
+function hasUsefulLocalInfo(localExtracted, speechText = "") {
+  const trimmed = (speechText || "").trim();
+  if (/^[1-9]$/.test(trimmed)) {
+    return true;
+  }
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length > 4) {
+    return false;
+  }
   if (localExtracted.detectedIntent && localExtracted.detectedIntent !== INTENTS.UNKNOWN) {
     return true;
   }
@@ -1751,7 +1760,7 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   }
   conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
 
-  const hasUsefulInfo = hasUsefulLocalInfo(localExtracted);
+  const hasUsefulInfo = hasUsefulLocalInfo(localExtracted, speechResult);
 
   if (hasUsefulInfo) {
     extractedByLocal = localExtracted.extractedFields;
@@ -2657,25 +2666,124 @@ async function handleChatEndpoint(request, env, tracker) {
     body = await tracker.measureAsync("requestParsingMs", () => request.json());
   } catch {}
 
-  const userText = body.text || "";
-  const history = Array.isArray(body.history) ? body.history : [];
+  let sessionId = body.sessionId || body.session_id || null;
+  const userText = (body.text || "").trim();
+  const phone = body.phone || "+916000000000";
+  const direction = body.direction || CALL_DIRECTION.INBOUND;
 
-  const conversationState = {
-    direction: CALL_DIRECTION.INBOUND,
-    intent: INTENTS.UNKNOWN,
-    stage: STAGES.WELCOME,
-    history,
-    customer: {},
-    missingFields: [],
-  };
+  let conversation = null;
+  let callRow = null;
 
-  const aiResult = await getTurnResponse(env, conversationState, userText, tracker);
+  if (sessionId && env.DB) {
+    try {
+      callRow = await tracker.measureAsync("sessionLookupMs", async () => {
+        return env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
+      });
+      if (callRow && callRow.session_data) {
+        conversation = JSON.parse(callRow.session_data);
+      }
+    } catch (e) {
+      log.error("D1 session lookup failed in /chat", { error: e.message });
+    }
+  }
+
+  // First call or session not found -> initialize new session
+  if (!sessionId || !conversation) {
+    sessionId = sessionId || `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    let customer = { phone };
+    if (env.DB) {
+      try {
+        customer = await dbGetOrCreateCustomer(env.DB, phone, tracker);
+      } catch {}
+    }
+
+    conversation = buildInitialConversation(direction, phone, customer);
+    const greeting = buildGreeting(direction);
+    conversation.lastQuestion = greeting;
+    conversation.history.push({ role: "asha", text: greeting });
+    conversation.turnCount = 1;
+
+    if (env.DB) {
+      try {
+        await tracker.measureAsync("dbWritesMs", async () => {
+          await env.DB.prepare(
+            "INSERT OR REPLACE INTO voice_calls (call_sid, phone, customer_id, status, stage, profiling_index, session_data) VALUES (?, ?, ?, 'in_progress', ?, 0, ?)"
+          ).bind(sessionId, phone, customer.id || null, conversation.stage, JSON.stringify(conversation)).run();
+        });
+      } catch (e) {
+        log.error("D1 insert call in /chat error", { error: e.message });
+      }
+    }
+
+    // If user text was provided on first call, process it
+    if (userText) {
+      const { replyText, isEnding, wantsHuman } = await processTurn(env, conversation, userText, sessionId, callRow, tracker);
+      return jsonResponse(
+        {
+          sessionId,
+          reply: replyText,
+          stage: conversation.stage,
+          ended: isEnding,
+          wantsHuman,
+          intent: conversation.intent,
+          customer: conversation.customer,
+          missingFields: conversation.missingFields,
+          quote: conversation.quote,
+        },
+        200,
+        reqOrigin,
+        tracker
+      );
+    }
+
+    return jsonResponse(
+      {
+        sessionId,
+        reply: greeting,
+        stage: conversation.stage,
+        customer: conversation.customer,
+        missingFields: conversation.missingFields,
+        ended: false,
+      },
+      200,
+      reqOrigin,
+      tracker
+    );
+  }
+
+  // Subsequent turn call with existing sessionId
+  if (!userText) {
+    return jsonResponse(
+      {
+        sessionId,
+        reply: conversation.lastQuestion || buildGreeting(conversation.direction),
+        stage: conversation.stage,
+        customer: conversation.customer,
+        missingFields: conversation.missingFields,
+        ended: conversation.stage === STAGES.ENDED,
+        wantsHuman: conversation.stage === STAGES.HUMAN_TRANSFER,
+        intent: conversation.intent,
+        quote: conversation.quote,
+      },
+      200,
+      reqOrigin,
+      tracker
+    );
+  }
+
+  const { replyText, isEnding, wantsHuman } = await processTurn(env, conversation, userText, sessionId, callRow, tracker);
 
   return jsonResponse(
     {
-      reply: aiResult.spokenResponse || "Hello! How can I assist you with TATA AIG health insurance today?",
-      intent: aiResult.detectedIntent || "general_inquiry",
-      action: aiResult.action || "NONE",
+      sessionId,
+      reply: replyText,
+      stage: conversation.stage,
+      ended: isEnding,
+      wantsHuman,
+      intent: conversation.intent,
+      customer: conversation.customer,
+      missingFields: conversation.missingFields,
+      quote: conversation.quote,
     },
     200,
     reqOrigin,

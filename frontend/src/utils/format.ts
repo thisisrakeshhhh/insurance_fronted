@@ -13,11 +13,10 @@ export function formatMs(ms: number): string {
 }
 
 export function formatTime(timestamp: number): string {
-  return new Intl.DateTimeFormat('en-IN', {
-    hour: '2-digit',
+  return new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
     minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
+    hour12: true,
   }).format(new Date(timestamp))
 }
 
