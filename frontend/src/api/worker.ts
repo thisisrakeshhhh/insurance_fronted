@@ -1,9 +1,19 @@
 import { useSettingsStore } from '@/store'
 import type { DbTableResponse, HealthStatus, SessionResponse, TurnResponse } from '@/types'
 
+const WORKER_BASE = 'https://tata-aig-voice-agent.whatsappai.workers.dev'
+
 export function getWorkerUrl() {
+  // In DEV we proxy API calls through Vite's dev server (vite.config proxy)
+  // BUT for TTS audio we must always go to the real worker (binary streaming doesn't work through proxy)
   if (import.meta.env.DEV) return ''
-  return useSettingsStore.getState().workerUrl || import.meta.env.VITE_WORKER_URL || 'https://tata-aig-voice-agent.whatsappai.workers.dev'
+  return useSettingsStore.getState().workerUrl || import.meta.env.VITE_WORKER_URL || WORKER_BASE
+}
+
+// Always returns the real worker URL — used for TTS audio URLs which must be absolute
+// because <Audio> src cannot go through the Vite dev proxy
+export function getWorkerBaseUrl() {
+  return useSettingsStore.getState().workerUrl || import.meta.env.VITE_WORKER_URL || WORKER_BASE
 }
 
 async function workerFetch<T>(path: string, options: RequestInit = {}): Promise<T> {

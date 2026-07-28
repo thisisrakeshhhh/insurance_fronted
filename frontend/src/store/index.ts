@@ -13,6 +13,8 @@ interface VoiceStore {
   lastTurn: TurnResponse | null
   sessionStartTime: number | null
   isMuted: boolean
+  callDirection: 'inbound' | 'outbound'
+  callGreeting: string
   setStatus: (status: VoiceStatus) => void
   setSessionId: (id: string | null) => void
   addMessage: (msg: Message) => void
@@ -23,6 +25,8 @@ interface VoiceStore {
   setLastTurn: (turn: TurnResponse | null) => void
   setSessionStartTime: (t: number | null) => void
   setMuted: (muted: boolean) => void
+  setCallDirection: (d: 'inbound' | 'outbound') => void
+  setCallGreeting: (g: string) => void
   resetSession: () => void
 }
 
@@ -37,6 +41,8 @@ const defaultVoiceState = {
   lastTurn: null,
   sessionStartTime: null,
   isMuted: false,
+  callDirection: 'outbound' as 'inbound' | 'outbound',
+  callGreeting: '',
 }
 
 export const useVoiceStore = create<VoiceStore>((set) => ({
@@ -51,7 +57,9 @@ export const useVoiceStore = create<VoiceStore>((set) => ({
   setLastTurn: (lastTurn) => set({ lastTurn }),
   setSessionStartTime: (sessionStartTime) => set({ sessionStartTime }),
   setMuted: (isMuted) => set({ isMuted }),
-  resetSession: () => set(defaultVoiceState),
+  setCallDirection: (callDirection) => set({ callDirection }),
+  setCallGreeting: (callGreeting) => set({ callGreeting }),
+  resetSession: () => set({ ...defaultVoiceState }),
 }))
 
 interface SettingsStore extends SettingsState {

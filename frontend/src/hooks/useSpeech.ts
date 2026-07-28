@@ -1,6 +1,6 @@
 import { useRef, useCallback } from 'react'
 import { useSettingsStore } from '@/store'
-import { getWorkerUrl } from '@/api/worker'
+import { getWorkerBaseUrl } from '@/api/worker'
 import { toast } from 'sonner'
 
 type TranscriptCallback = (text: string, isFinal: boolean, confidence: number) => void
@@ -129,7 +129,8 @@ export function useSpeech(): SpeechHook {
     stopSpeaking()
     isSpeakingRef.current = true
 
-    const workerUrl = getWorkerUrl()
+    // Always use the real worker URL for TTS audio (not the Vite proxy)
+    const workerUrl = getWorkerBaseUrl()
     const ttsAudioUrl = `${workerUrl}/api/tts?text=${encodeURIComponent(text)}`
     const audio = new Audio(ttsAudioUrl)
     audioRef.current = audio

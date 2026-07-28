@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 import { toast } from 'sonner'
-import { startBrowserSession, sendBrowserTurn, makeTestCall, clearSessionProfile } from '@/api/worker'
+import { startBrowserSession, sendBrowserTurn, makeTestCall, clearSessionProfile, endSession } from '@/api/worker'
 import { useVoiceStore, useSettingsStore } from '@/store'
 import { useSpeech } from './useSpeech'
 import type { Message } from '@/types'
@@ -109,6 +109,7 @@ export function useVoiceSession() {
     startingRef.current = true
     store.resetSession()
     store.setStatus('connecting')
+    store.setCallDirection(direction)
     try {
       const session = await startBrowserSession(direction, phone || settings.devPhone)
       store.setSessionId(session.sessionId)
@@ -116,6 +117,7 @@ export function useVoiceSession() {
       store.setCurrentModel(session.model)
       store.setCurrentCustomer(session.customer)
       store.setSessionStartTime(Date.now())
+      store.setCallGreeting(session.greeting)
 
       addMsg('asha', session.greeting, { stage: session.stage })
 
@@ -141,6 +143,11 @@ export function useVoiceSession() {
     speech.stopListening()
     speech.stopSpeaking()
     store.setStatus('ended')
+    // Best-effort end session on the backend
+    const sid = useVoiceStore.getState().sessionId
+    if (sid) {
+      endSession(sid).catch(() => {})
+    }
   }, [speech, store])
 
   const sendTurn = useCallback(async (text: string) => {
