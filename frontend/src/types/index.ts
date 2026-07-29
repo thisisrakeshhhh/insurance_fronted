@@ -15,6 +15,17 @@ export interface TurnResponse {
   action: string
   latencyMs: number
   model?: string
+  customerEmotion?: string
+  responseTone?: string
+  customer?: Record<string, any>
+  extractedFields?: Record<string, any>
+  missingFields?: string[]
+  quote?: any
+  summary?: string
+  turnCount?: number
+  stage?: string
+  wantsHuman?: boolean
+  ended?: boolean
 }
 
 export interface Message {

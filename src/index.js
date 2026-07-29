@@ -47,6 +47,19 @@ const INTENTS = {
   TALK_TO_ADVISOR: "talk_to_advisor",
   COMPLAINT: "complaint",
   GENERAL_INQUIRY: "general_inquiry",
+  // ── New intents ──────────────────────────────────────
+  PORTABILITY: "portability",           // switch from another insurer
+  CANCELLATION: "cancellation",         // cancel existing policy
+  NOMINEE_UPDATE: "nominee_update",     // change nominee
+  ADD_ON_COVER: "add_on_cover",         // add maternity / critical illness rider
+  PRE_AUTHORIZATION: "pre_authorization", // cashless pre-approval before admission
+  CLAIM_STATUS: "claim_status",         // check a claim already filed (≠ CLAIMS)
+  KYC_UPDATE: "kyc_update",             // update KYC / address / documents
+  ENDORSEMENT: "endorsement",           // correct name/DOB/address on policy
+  PAYMENT_ISSUE: "payment_issue",       // premium payment failed / need payment link
+  POLICY_DOCUMENT: "policy_document",   // get a copy of policy documents
+  PREMIUM_RECEIPT: "premium_receipt",   // get premium receipt / tax receipt
+  WELLNESS: "wellness",                 // wellness benefits, health check-ups
   UNKNOWN: "unknown",
 };
 
@@ -61,6 +74,19 @@ const INTENT_TO_STAGE = {
   [INTENTS.TALK_TO_ADVISOR]: STAGES.HUMAN_TRANSFER,
   [INTENTS.COMPLAINT]: STAGES.HUMAN_TRANSFER,
   [INTENTS.GENERAL_INQUIRY]: STAGES.POLICY_QUESTIONS,
+  // ── New intents ──────────────────────────────────────
+  [INTENTS.PORTABILITY]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.CANCELLATION]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.NOMINEE_UPDATE]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.ADD_ON_COVER]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.PRE_AUTHORIZATION]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.CLAIM_STATUS]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.KYC_UPDATE]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.ENDORSEMENT]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.PAYMENT_ISSUE]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.POLICY_DOCUMENT]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.PREMIUM_RECEIPT]: STAGES.POLICY_QUESTIONS,
+  [INTENTS.WELLNESS]: STAGES.POLICY_QUESTIONS,
   [INTENTS.UNKNOWN]: STAGES.INTENT_SELECTION,
 };
 
@@ -75,6 +101,19 @@ const INTENT_REQUIRED_FIELDS = {
   [INTENTS.TALK_TO_ADVISOR]: [],
   [INTENTS.COMPLAINT]: [],
   [INTENTS.GENERAL_INQUIRY]: [],
+  // ── New intents ──────────────────────────────────────
+  [INTENTS.PORTABILITY]: ["existing_insurer", "policy_number", "renewal_date"],
+  [INTENTS.CANCELLATION]: ["policy_number", "cancellation_reason"],
+  [INTENTS.NOMINEE_UPDATE]: ["policy_number", "nominee_name", "nominee_relation"],
+  [INTENTS.ADD_ON_COVER]: ["policy_number", "addon_type"],
+  [INTENTS.PRE_AUTHORIZATION]: ["policy_number", "hospital_name", "admission_date"],
+  [INTENTS.CLAIM_STATUS]: ["policy_number", "claim_reference_number"],
+  [INTENTS.KYC_UPDATE]: ["policy_number"],
+  [INTENTS.ENDORSEMENT]: ["policy_number", "endorsement_type"],
+  [INTENTS.PAYMENT_ISSUE]: ["policy_number"],
+  [INTENTS.POLICY_DOCUMENT]: ["policy_number"],
+  [INTENTS.PREMIUM_RECEIPT]: ["policy_number"],
+  [INTENTS.WELLNESS]: [],
   [INTENTS.UNKNOWN]: [],
 };
 
@@ -86,6 +125,8 @@ const DTMF_INTENT_MAP = {
   "3": INTENTS.CLAIMS,
   "4": INTENTS.CASHLESS_HOSPITAL,
   "5": INTENTS.TALK_TO_ADVISOR,
+  "6": INTENTS.CLAIM_STATUS,
+  "7": INTENTS.PAYMENT_ISSUE,
   "9": INTENTS.COMPLAINT,
 };
 
@@ -99,6 +140,45 @@ const INTENT_INTRO_TEXT = {
   [INTENTS.TAX_BENEFITS]: "Sure — your health insurance premium can qualify for a tax deduction under Section 80D. What would you like to know?",
   [INTENTS.COMPLAINT]: "I'm sorry to hear that. Let me connect you to someone who can help resolve this.",
   [INTENTS.GENERAL_INQUIRY]: "Sure, happy to help. What would you like to know?",
+  // ── New intents ──────────────────────────────────────
+  [INTENTS.PORTABILITY]: "I can help you port your policy to TATA AIG! Could you tell me your current insurer's name?",
+  [INTENTS.CANCELLATION]: "I understand. Could you share your policy number so I can look into the cancellation process?",
+  [INTENTS.NOMINEE_UPDATE]: "Sure, I can help update your nominee. Could you share your policy number?",
+  [INTENTS.ADD_ON_COVER]: "Great — adding a rider is easy. Could you share your policy number and which add-on you'd like?",
+  [INTENTS.PRE_AUTHORIZATION]: "I can initiate the pre-authorization for you. Could you share your policy number?",
+  [INTENTS.CLAIM_STATUS]: "Sure, I can check your claim status. Could you share your policy number?",
+  [INTENTS.KYC_UPDATE]: "I can help update your KYC. Could you share your policy number?",
+  [INTENTS.ENDORSEMENT]: "I can raise a correction request. Could you share your policy number?",
+  [INTENTS.PAYMENT_ISSUE]: "I'm sorry about that. Let me help sort out the payment. Could you share your policy number?",
+  [INTENTS.POLICY_DOCUMENT]: "I can arrange a copy of your policy documents. Could you share your policy number?",
+  [INTENTS.PREMIUM_RECEIPT]: "I can generate your premium receipt. Could you share your policy number?",
+  [INTENTS.WELLNESS]: "TATA AIG offers wellness programs including free health check-ups and OPD consultations. What would you like to know?",
+};
+
+// Synonym glossary — injected into Groq system prompt for paraphrase robustness.
+// The AI uses this to recognise intent under varied English/Hindi/Hinglish wording.
+const INTENT_SYNONYMS_GLOSSARY = {
+  [INTENTS.BUY_POLICY]: ["new policy", "buy insurance", "need cover", "naya plan", "policy chahiye", "insurance lena hai", "protect my family", "get insured", "health plan chahiye", "naya cover"],
+  [INTENTS.RENEWAL]: ["renew", "policy expiring", "due for renewal", "renewal date", "extend my policy", "policy khatam ho rahi hai", "policy renew karni hai"],
+  [INTENTS.CLAIMS]: ["file a claim", "hospital bill", "reimbursement", "claim paisa", "admitted in hospital", "surgery claim", "claim dalna hai", "hospital mein tha"],
+  [INTENTS.CLAIM_STATUS]: ["claim status", "already filed a claim", "when will I get my claim money", "claim update", "claim ka kya hua", "claim approve hua kya"],
+  [INTENTS.CASHLESS_HOSPITAL]: ["cashless hospital", "network hospital", "hospital list", "which hospitals accept", "hospital near me", "cashless treatment"],
+  [INTENTS.PRE_AUTHORIZATION]: ["pre-authorization", "pre-approval before admission", "planned surgery approval", "cashless approval", "pre-auth chahiye"],
+  [INTENTS.POLICY_STATUS]: ["is my policy active", "check my policy", "policy details", "policy active hai kya"],
+  [INTENTS.PREMIUM_QUERY]: ["how much is my premium", "premium amount", "what do I pay", "premium kitna hai"],
+  [INTENTS.PAYMENT_ISSUE]: ["payment failed", "payment link", "couldn't pay", "transaction failed", "payment nahi hua", "payment link do"],
+  [INTENTS.PORTABILITY]: ["switch insurer", "port my policy", "move from another company", "change insurance company", "dusri company se shift karna hai"],
+  [INTENTS.CANCELLATION]: ["cancel my policy", "I don't want this policy anymore", "refund my policy", "policy band karo", "policy cancel karni hai"],
+  [INTENTS.NOMINEE_UPDATE]: ["change nominee", "update beneficiary", "nominee change", "nominee badalna hai"],
+  [INTENTS.ADD_ON_COVER]: ["add a rider", "add maternity cover", "add critical illness cover", "increase my coverage", "rider add karna hai"],
+  [INTENTS.KYC_UPDATE]: ["update KYC", "update my documents", "update address", "KYC update karna hai"],
+  [INTENTS.ENDORSEMENT]: ["correct my name", "spelling mistake in policy", "wrong date of birth on policy", "naam galat hai policy mein"],
+  [INTENTS.POLICY_DOCUMENT]: ["policy copy", "policy document", "send my policy", "policy ka copy chahiye"],
+  [INTENTS.PREMIUM_RECEIPT]: ["premium receipt", "tax receipt", "80D receipt", "premium ka receipt chahiye"],
+  [INTENTS.WELLNESS]: ["health check-up", "wellness benefit", "OPD", "free check-up", "wellness program"],
+  [INTENTS.TAX_BENEFITS]: ["tax saving", "80D", "tax deduction", "income tax benefit", "tax bachana hai"],
+  [INTENTS.TALK_TO_ADVISOR]: ["real person", "human", "agent", "representative", "call center", "advisor se baat karni hai"],
+  [INTENTS.COMPLAINT]: ["complaint", "unhappy", "bad service", "not satisfied", "escalate", "complaint dena hai", "problem hai"],
 };
 
 const CALL_DIRECTION = {
@@ -288,40 +368,120 @@ class PerformanceTracker {
   }
 }
 
-const ASHA_PERSONALITY = `You are Asha, a warm, professional, and empathetic health insurance advisor at TATA AIG Health Insurance. Speak naturally in 1-2 short sentences.`;
-
-const INSURANCE_KNOWLEDGE = `TATA AIG Health: 7,000+ cashless hospitals. Tax Deductions under 80D up to ₹25k-₹75k. Medicare Individual, Medicare Family, Senior Citizen, Critical Illness, Super Top-Up.`;
-
-function buildAshaSystemPrompt(conversation, direction) {
-  const isOutbound = direction === CALL_DIRECTION.OUTBOUND;
-  const intent = conversation.intent || INTENTS.UNKNOWN;
-  const isTaskKnown = intent !== INTENTS.UNKNOWN;
-
-  return `${ASHA_PERSONALITY}
-${INSURANCE_KNOWLEDGE}
-CONTEXT: Direction: ${direction} (${isOutbound ? "outbound" : "inbound"}), Stage: ${conversation.stage}, Active task/intent: ${intent}, Profile so far: ${JSON.stringify(conversation.customer)}
-FIELDS STILL NEEDED FOR THIS TASK ONLY: ${JSON.stringify(conversation.missingFields || [])}
-RULES:
-1. Reply naturally for the CURRENT stage and the CURRENT active task only.
-2. TASK SCOPE IS STRICT: never ask for a field that is not in "FIELDS STILL NEEDED FOR THIS TASK ONLY". For example, do not ask age, budget, or medical history during a renewal, claim, or hospital-search task — those only need what's listed above. Full per-intent requirement map, for reference only: ${JSON.stringify(INTENT_REQUIRED_FIELDS)}.
-3. If "FIELDS STILL NEEDED FOR THIS TASK ONLY" is empty, do NOT ask any further profiling question — acknowledge and move toward closing the task.
-4. If the customer already volunteered a value in their message (a policy number, city, mobile number, etc.), extract it into extractedFields even if it wasn't explicitly asked for. Never ask again for something already said.
-5. Ask for at most ONE missing field per turn, chosen from the list above.
-6. Set wantsHuman true if human transfer keywords are mentioned.
-7. If intentConfidence for a newly detected intent is below 0.6, phrase spokenResponse as a brief one-line confirmation of the intent rather than proceeding into task questions.
-8. CRITICAL: spokenResponse MUST be 1-2 short friendly sentences. NO JSON or code in spokenResponse.
-${isTaskKnown ? "" : "9. No task has been identified yet — gently ask what the customer needs (buy a policy, renew, claim, find a hospital, or speak to an advisor)."}
-10. Vary your sentence structure and vocabulary naturally turn to turn. NEVER repeat identical phrasing or question templates from earlier in the chat history, even when asking about the same missing field or intent.
-OUTPUT FORMAT: JSON only
-{"extractedFields":{"name":null,"email":null,"age":null,"city":null,"pincode":null,"family_members":null,"existing_insurer":null,"renewal_date":null,"medical_history":null,"budget":null,"buying_timeline":null,"appointment_datetime":null,"policy_number":null,"hospital_name":null,"insured_person":null},"detectedIntent":"buy_policy","intentConfidence":0.9,"objectionType":null,"wantsHuman":false,"spokenResponse":"text","callSummary":"summary"}`;
+function detectEmotionFast(text) {
+  const lower = (text || "").toLowerCase();
+  
+  // Emergency overrides everything
+  if (/\b(emergency|hospital now|admitted|bleeding|accident|heart attack|critical|ambulance|112)\b/i.test(lower)) {
+    return { emotion: "urgent", tone: "urgent", instruction: "CUSTOMER IS IN AN EMERGENCY. Be extremely brief, direct, and action-oriented. Tell them to call 112 immediately if needed. No sales talk." };
+  }
+  
+  // Angry / Frustrated
+  if (/\b(angry|frustrated|worst|terrible|useless|pathetic|cheat|fraud|scam|shut up|stupid|idiot|waste|cancel|complaint|manager|supervisor|bakwaas|bekaar|chor|dhokha)\b/i.test(lower) || /[!]{2,}/.test(text)) {
+    return { emotion: "angry", tone: "empathetic", instruction: "Customer is FRUSTRATED or ANGRY. FIRST acknowledge their feelings sincerely ('I completely understand how frustrating this is'). NEVER be defensive. THEN solve the problem." };
+  }
+  
+  // Worried / Scared
+  if (/\b(worried|scared|afraid|tension|stress|tensed|pareshan|dukh|dard|bimar|bimari|hospital|operation|surgery)\b/i.test(lower)) {
+    return { emotion: "worried", tone: "empathetic", instruction: "Customer is WORRIED about health/money. Be warm, reassuring, and patient. Use a caring, human tone. Don't rush them." };
+  }
+  
+  // Confused
+  if (/\b(confused|don't understand|what do you mean|not sure|maybe|i guess|kya|samajh nahi|matlab|kaise)\b/i.test(lower)) {
+    return { emotion: "confused", tone: "patient", instruction: "Customer seems CONFUSED. Use extremely simple language. Break into 1 small fact per sentence. Confirm understanding." };
+  }
+  
+  // Happy / Satisfied
+  if (/\b(thank|thanks|great|awesome|perfect|love|happy|pleased|appreciate|good job|well done|best|dhanyavad|shukriya)\b/i.test(lower)) {
+    return { emotion: "happy", tone: "cheerful", instruction: "Customer is POSITIVE. Match their energy. Be warm, enthusiastic, and friendly." };
+  }
+  
+  return { emotion: "neutral", tone: "professional", instruction: "Maintain a warm, professional, conversational tone." };
 }
 
-function buildUserPrompt(speechResult, history) {
-  let histText = "";
-  if (history && history.length > 0) {
-    histText = history.slice(-8).map((h) => `${h.role === "asha" ? "Asha" : "Customer"}: ${h.text || h.content || ""}`).join("\n");
-  }
-  return `Chat History:\n${histText}\nCustomer: "${speechResult}"\nAnalyze context and return JSON.`;
+const ASHA_CORE_PERSONALITY = `You are Asha, a warm, human-like AI voice assistant for TATA AIG Health Insurance.
+
+TONE RULES:
+- Speak like a real human on a phone call. NEVER robotic.
+- 1-2 short sentences max per reply.
+- Match the customer's language (English/Hindi/Hinglish).
+- NEVER ask two questions in one turn. ONE detail at a time.
+
+HARD RULES:
+- Ask for EXACTLY ONE missing field per turn.
+- Never repeat something the customer already told you.
+- If they want a human, set wantsHuman=true.
+- If medical emergency, tell them to call 112 first.
+
+OUTPUT FORMAT — JSON only:
+{
+  "customerEmotion": "angry|worried|confused|happy|neutral|urgent",
+  "responseTone": "empathetic|patient|cheerful|professional|urgent",
+  "extractedFields": {},
+  "detectedIntent": "buy_policy|renewal|claims|...",
+  "intentConfidence": 0.9,
+  "wantsHuman": false,
+  "spokenResponse": "your natural reply here",
+  "callSummary": "brief update"
+}`;
+
+function buildSmartSystemPrompt(conversation, direction, emotionMeta) {
+  const isOutbound = direction === CALL_DIRECTION.OUTBOUND;
+  
+  return `${ASHA_CORE_PERSONALITY}
+
+${emotionMeta ? emotionMeta.instruction : "Maintain a warm, professional, conversational tone."}
+
+CURRENT CALL: ${isOutbound ? "Outbound — you called them" : "Inbound — they called us"}
+CURRENT GOAL: ${conversation.intent || "Understand customer need"}
+STAGE: ${conversation.stage}`;
+}
+
+function buildAshaSystemPrompt(conversation, direction) {
+  const emotionMeta = detectEmotionFast(conversation.lastCustomerSpeech || "");
+  return buildSmartSystemPrompt(conversation, direction, emotionMeta);
+}
+
+function buildSmartUserPrompt(speechResult, history, lastQuestion, conversation) {
+  const known = [];
+  const c = (conversation && conversation.customer) || {};
+  if (c.name) known.push(`Name: ${c.name}`);
+  if (c.age) known.push(`Age: ${c.age}`);
+  if (c.city) known.push(`City: ${c.city}`);
+  if (c.family_members) known.push(`Family: ${c.family_members}`);
+  if (c.budget) known.push(`Budget: ${c.budget}`);
+  if (c.medical_history) known.push(`Medical: ${c.medical_history}`);
+  if (c.policy_number) known.push(`Policy#: ${c.policy_number}`);
+  
+  const knownStr = known.length ? known.join(" | ") : "Nothing collected yet.";
+  const missing = (conversation && conversation.missingFields) || [];
+  const nextQuestion = missing.length > 0 ? missing[0] : "all fields collected — wrap up or recommend";
+  
+  const recentHistory = (history || []).slice(-10).map(h => {
+    const name = h.role === "asha" ? "Asha" : "Customer";
+    return `${name}: ${h.text || h.content || ""}`;
+  }).join("\n");
+
+  return `CONVERSATION HISTORY:
+${recentHistory || "(Start of conversation)"}
+
+WHAT WE ALREADY KNOW: ${knownStr}
+WHAT WE STILL NEED: ${nextQuestion}
+${lastQuestion ? `ASHA'S LAST QUESTION: "${lastQuestion}"` : ""}
+
+CUSTOMER JUST SAID: "${speechResult}"
+
+TASK:
+1. Detect emotion from their message.
+2. Extract ANY new info they provided (even if not asked).
+3. Reply naturally as Asha in 1-2 sentences.
+4. If all fields are known, give a brief recommendation or close.
+
+Return valid JSON only.`;
+}
+
+function buildUserPrompt(speechResult, history, lastQuestion, conversation) {
+  return buildSmartUserPrompt(speechResult, history, lastQuestion, conversation);
 }
 
 function createLogger(module = "app") {
@@ -397,18 +557,9 @@ function runLocalExtraction(speech, conversation) {
       result.detectedIntent = DTMF_INTENT_MAP[digit];
     }
   } else {
-    if (/\b(renew|renewal|expire|expiring)\b/i.test(text)) {
-      result.detectedIntent = INTENTS.RENEWAL;
-    } else if (/\b(claim|claims|bills|reimburse|reimbursement)\b/i.test(text)) {
-      result.detectedIntent = INTENTS.CLAIMS;
-    } else if (/\b(hospital|hospitals|cashless|network)\b/i.test(text)) {
-      result.detectedIntent = INTENTS.CASHLESS_HOSPITAL;
-    } else if (/\b(advisor|agent|representative|human|talk to|connect me|speak to)\b/i.test(text)) {
-      result.detectedIntent = INTENTS.TALK_TO_ADVISOR;
-    } else if (/\b(complaint|complain|grievance|issue|dissatisfied|wrong charge|bad service)\b/i.test(text)) {
-      result.detectedIntent = INTENTS.COMPLAINT;
-    } else if (/\b(buy|purchase|new|policy|insurance|cover|plan|get|need|want)\b/i.test(text)) {
-      result.detectedIntent = INTENTS.BUY_POLICY;
+    const guess = detectIntentLocally(text);
+    if (guess !== INTENTS.UNKNOWN) {
+      result.detectedIntent = guess;
     }
   }
 
@@ -465,7 +616,7 @@ function runLocalExtraction(speech, conversation) {
     } else {
       result.extractedFields.family_members = 3;
     }
-  } else if (/\b(myself|only me|me|individual|single|just me|self)\b/i.test(text)) {
+  } else if (/\b(induvidaul|individual|myself|only me|me|single|just me|self|1)\b/i.test(text)) {
     result.extractedFields.family_members = 1;
   }
 
@@ -489,7 +640,7 @@ function runLocalExtraction(speech, conversation) {
   }
 
   const isDirectNo = (lower === "no" || lower === "no.") && conversation && conversation.lastQuestion && conversation.lastQuestion.toLowerCase().includes("medical");
-  if (/\b(no disease|no history|no illness|none|nil|nothing|no health issue|no medical history|no issues|healthy|fit)\b/i.test(text) || isDirectNo) {
+  if (/\b(no disease|no history|no illness|none|nil|nothing|no health issue|no medical history|no medical condition|no medical conditions|no condition|no conditions|no issues|no problem|no problems|healthy|fit|fine|normal)\b/i.test(text) || isDirectNo) {
     result.extractedFields.medical_history = "None";
   } else {
     const conditions = ["diabetes", "bp", "blood pressure", "hypertension", "asthma", "thyroid", "heart", "cancer", "diabetic"];
@@ -524,18 +675,15 @@ function runLocalExtraction(speech, conversation) {
   return result;
 }
 
-function hasUsefulLocalInfo(localExtracted, speechText = "") {
+function hasUsefulLocalInfo(localExtracted, speechText) {
   const trimmed = (speechText || "").trim();
-  // Only use static local template response for single-digit DTMF keypresses (e.g. "1", "2")
-  if (/^[1-9]$/.test(trimmed)) {
-    return true;
-  }
-  // All conversational speech and text turns must go through Groq AI
-  return false;
+  // Only use local fallback for DTMF-style single digits (1, 2, 3, etc.)
+  // All natural speech turns go through Groq AI for fully adaptive human conversation.
+  return /^[1-9]$/.test(trimmed);
 }
 
 function generateLocalResponse(conversation) {
-  const intent = conversation.intent || INTENTS.UNKNOWN;
+  const intent = conversation.intent || INTENTS.BUY_POLICY;
   const missing = conversation.missingFields || [];
 
   if (conversation.appointmentBooked || conversation.stage === STAGES.CLOSING || conversation.stage === STAGES.ENDED) {
@@ -556,34 +704,31 @@ function generateLocalResponse(conversation) {
     return "Thank you for calling TATA AIG Health Insurance. Goodbye!";
   }
 
-  if (intent === INTENTS.UNKNOWN) {
-    return "Thank you for calling TATA AIG Health Insurance. I can help you buy a new policy, renew your current policy, file a claim, or find a network hospital. What would you like to do today?";
-  }
-
   if (intent === INTENTS.BUY_POLICY) {
     if (missing.includes("age")) {
       return "Great! Let's find the right health plan for you. Could you tell me your age?";
     }
     if (missing.includes("city")) {
-      return "Got it. Which city do you live in?";
+      return "Got it. Which city are you based in?";
     }
     if (missing.includes("family_members")) {
-      return "Understood. Who would you like to cover in this policy? Yourself, or your family members too?";
+      return "Understood — would this cover just you, or your family as well?";
     }
     if (missing.includes("medical_history")) {
-      return "And do you have any pre-existing medical conditions, or is there no medical history?";
+      return "And do you or anyone being covered have any existing medical conditions, like diabetes or high blood pressure?";
     }
     if (missing.includes("budget")) {
-      return "What is your approximate annual budget for the premium?";
+      return "What's your approximate annual budget for the premium?";
     }
     if (missing.includes("buying_timeline")) {
-      return "When are you planning to purchase this policy?";
+      return "When are you looking to buy — right away, or just exploring for now?";
     }
 
     if (conversation.quote) {
-      return `Based on your profile, I recommend the ${conversation.quote.planName} which provides ${conversation.quote.coverage} coverage for about ${conversation.quote.premiumRange}. Would you like to schedule an appointment with a health advisor to proceed?`;
+      const q = conversation.quote;
+      return `Based on your profile, I'd recommend the ${q.planName}, offering ${q.coverage} coverage for about ${q.premiumRange}. Would you like to schedule a call with an advisor to proceed?`;
     }
-    return "Thank you for providing the details. I will connect you with a health advisor shortly to complete your policy purchase.";
+    return "Thank you for sharing those details — let me put together the right recommendation for you.";
   }
 
   if (intent === INTENTS.RENEWAL) {
@@ -626,7 +771,115 @@ function generateLocalResponse(conversation) {
     return "I understand your concern. Let me connect you with a customer support executive immediately to address this.";
   }
 
-  return "I'm here to assist you. Are you looking to buy a policy, renew, make a claim, or find a network hospital?";
+  if (intent === INTENTS.PORTABILITY) {
+    if (missing.includes("existing_insurer")) {
+      return "Happy to help you port your policy to TATA AIG! Which insurance company are you currently with?";
+    }
+    if (missing.includes("renewal_date")) {
+      return "Got it. When is your current policy due for renewal?";
+    }
+    return "Thank you. I have initiated your portability request. A TATA AIG advisor will call you with the next steps.";
+  }
+
+  if (intent === INTENTS.CANCELLATION) {
+    if (missing.includes("policy_number")) {
+      return "I can help with the cancellation. Could you share your policy number?";
+    }
+    if (missing.includes("cancellation_reason")) {
+      return "May I ask the reason for cancellation? This helps us see if there's anything we can do for you.";
+    }
+    return "I have noted your cancellation request. A specialist will call you within 24 hours to guide you through the process.";
+  }
+
+  if (intent === INTENTS.NOMINEE_UPDATE) {
+    if (missing.includes("policy_number")) {
+      return "Sure, I can help update your nominee. Could you share your policy number?";
+    }
+    if (missing.includes("nominee_name")) {
+      return "What is the name of the new nominee you'd like to add?";
+    }
+    if (missing.includes("nominee_relation")) {
+      return `And what is ${conversation.customer.nominee_name || "their"} relationship to you?`;
+    }
+    return "Thank you. Your nominee update request has been submitted. You'll receive a confirmation on your registered mobile.";
+  }
+
+  if (intent === INTENTS.ADD_ON_COVER) {
+    if (missing.includes("policy_number")) {
+      return "Of course! To add a rider, could you share your policy number first?";
+    }
+    if (missing.includes("addon_type")) {
+      return "Which rider would you like to add? For example, maternity cover, critical illness cover, or personal accident cover?";
+    }
+    return `Thank you. I have raised a request to add ${conversation.customer.addon_type || "the rider"} to your policy. An advisor will confirm the details and premium change.`;
+  }
+
+  if (intent === INTENTS.PRE_AUTHORIZATION) {
+    if (missing.includes("policy_number")) {
+      return "I can initiate the pre-authorization for your admission. Could you share your policy number?";
+    }
+    if (missing.includes("hospital_name")) {
+      return "Which hospital are you planning to get admitted to?";
+    }
+    if (missing.includes("admission_date")) {
+      return "What is the expected admission date?";
+    }
+    return `Thank you. I have submitted a pre-authorization request for ${conversation.customer.hospital_name || "the hospital"}. You should receive approval within 2 hours on your registered mobile.`;
+  }
+
+  if (intent === INTENTS.CLAIM_STATUS) {
+    if (missing.includes("policy_number")) {
+      return "I can check your claim status. Could you share your policy number?";
+    }
+    if (missing.includes("claim_reference_number")) {
+      return "Do you have the claim reference number? It would have been sent to you via SMS or email when you filed the claim.";
+    }
+    return `Thank you. I will have the claims team update you on the status for policy ${conversation.customer.policy_number || "your policy"} within the hour.`;
+  }
+
+  if (intent === INTENTS.KYC_UPDATE) {
+    if (missing.includes("policy_number")) {
+      return "I can help with your KYC update. Could you share your policy number?";
+    }
+    return `Thank you. Our KYC portal link has been sent to your registered mobile for policy ${conversation.customer.policy_number || "your policy"}. You can upload your documents there.`;
+  }
+
+  if (intent === INTENTS.ENDORSEMENT) {
+    if (missing.includes("policy_number")) {
+      return "I can raise a correction request. Could you share your policy number?";
+    }
+    if (missing.includes("endorsement_type")) {
+      return "What correction is needed — for example, name spelling, date of birth, or address?";
+    }
+    return `Thank you. I have raised an endorsement request for ${conversation.customer.endorsement_type || "the correction"} on policy ${conversation.customer.policy_number || "your policy"}. It will be processed within 3–5 business days.`;
+  }
+
+  if (intent === INTENTS.PAYMENT_ISSUE) {
+    if (missing.includes("policy_number")) {
+      return "I'm sorry to hear about the payment issue. Could you share your policy number?";
+    }
+    return `I have sent a secure payment link for policy ${conversation.customer.policy_number || "your policy"} to your registered mobile. You can use it to complete the payment safely.`;
+  }
+
+  if (intent === INTENTS.POLICY_DOCUMENT) {
+    if (missing.includes("policy_number")) {
+      return "I can arrange a copy of your policy document. Could you share your policy number?";
+    }
+    return `A copy of your policy document for ${conversation.customer.policy_number || "your policy"} has been sent to your registered email and WhatsApp.`;
+  }
+
+  if (intent === INTENTS.PREMIUM_RECEIPT) {
+    if (missing.includes("policy_number")) {
+      return "I can generate your premium receipt. Could you share your policy number?";
+    }
+    return `Your premium receipt for policy ${conversation.customer.policy_number || "your policy"} has been sent to your registered email. You can use it for your Section 80D tax deduction.`;
+  }
+
+  if (intent === INTENTS.WELLNESS) {
+    return "TATA AIG's wellness program includes free annual health check-ups, OPD consultations, and fitness discounts. I'll send the complete wellness benefit guide to your WhatsApp.";
+  }
+
+  return "Thank you for calling TATA AIG Health Insurance. I can help you buy a new policy, renew existing cover, file a claim, or find a network hospital. What would you like to do today?";
 }
 
 async function withTimeout(promise, ms, fallbackValue) {
@@ -729,10 +982,21 @@ function requireTwilioSignature(handler) {
 function getMissingFields(customer, intent) {
   const activeIntent = intent || INTENTS.UNKNOWN;
 
+  // RENEWAL: either policy_number OR existing_insurer counts as identifier
   if (activeIntent === INTENTS.RENEWAL) {
     const missing = [];
     const hasIdentifier = !!(customer.policy_number || customer.existing_insurer);
     if (!hasIdentifier) missing.push("policy_number");
+    if (!customer.renewal_date) missing.push("renewal_date");
+    return missing;
+  }
+
+  // PORTABILITY: same shared-identifier rule as RENEWAL
+  if (activeIntent === INTENTS.PORTABILITY) {
+    const missing = [];
+    const hasIdentifier = !!(customer.existing_insurer || customer.policy_number);
+    if (!hasIdentifier) missing.push("existing_insurer");
+    if (!customer.policy_number && !customer.existing_insurer) {} // already pushed above
     if (!customer.renewal_date) missing.push("renewal_date");
     return missing;
   }
@@ -1120,12 +1384,12 @@ async function callGroq(env, prompt, systemPrompt = "", tracker) {
     throw err;
   }
 
-  const model = env.GROQ_MODEL || CONFIG.GROQ_MODEL || "llama-3.3-70b-versatile";
+  const primaryModel = env.GROQ_MODEL || CONFIG.GROQ_MODEL || "llama-3.3-70b-versatile";
   const url = "https://api.groq.com/openai/v1/chat/completions";
 
   if (tracker) {
     tracker.aiTrace.providerSelected = "groq";
-    tracker.aiTrace.modelName = model;
+    tracker.aiTrace.modelName = primaryModel;
     tracker.aiTrace.requestUrl = url;
   }
 
@@ -1134,7 +1398,7 @@ async function callGroq(env, prompt, systemPrompt = "", tracker) {
   messages.push({ role: "user", content: prompt });
 
   const t0 = Date.now();
-  const exec = async () => {
+  const exec = async (modelToUse = primaryModel) => {
     const resp = await fetch(url, {
       method: "POST",
       headers: {
@@ -1142,11 +1406,12 @@ async function callGroq(env, prompt, systemPrompt = "", tracker) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model,
+        model: modelToUse,
         messages,
         response_format: { type: "json_object" },
-        temperature: 0.3,
-        max_tokens: 500,
+        temperature: 0.7,
+        max_tokens: 350,
+        top_p: 0.9,
       }),
     });
 
@@ -1157,6 +1422,10 @@ async function callGroq(env, prompt, systemPrompt = "", tracker) {
 
     if (!resp.ok) {
       const errText = await resp.text();
+      if (resp.status === 429 && modelToUse !== "llama-3.1-8b-instant") {
+        log.warn("Groq 429 rate limit on primary model, falling back to llama-3.1-8b-instant");
+        return await exec("llama-3.1-8b-instant");
+      }
       if (tracker) tracker.aiTrace.responseBodySnippet = errText.slice(0, 300);
       throw new Error(`Groq API error ${resp.status}: ${errText}`);
     }
@@ -1177,7 +1446,8 @@ async function callGemini(env, prompt, systemPrompt = "", tracker) {
     throw err;
   }
 
-  const model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL || "gemini-1.5-flash";
+  let model = env.GEMINI_MODEL || CONFIG.GEMINI_MODEL || "gemini-1.5-flash-latest";
+  if (model === "gemini-1.5-flash") model = "gemini-1.5-flash-latest";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   if (tracker) {
@@ -1355,6 +1625,36 @@ function validateResponse(reply) {
   return cleaned.split(/(?<=[.?!])\s+/).slice(0, 2).join(" ");
 }
 
+function detectIntentLocally(text) {
+  const lower = (text || "").toLowerCase().trim();
+  if (!lower) return INTENTS.UNKNOWN;
+
+  for (const [intent, phrases] of Object.entries(INTENT_SYNONYMS_GLOSSARY)) {
+    if (phrases.some((p) => lower.includes(p.toLowerCase()))) return intent;
+  }
+
+  if (/\b(new|buy|purchase|cover|plan|policy|health insurance)\b/i.test(lower)) {
+    return INTENTS.BUY_POLICY;
+  }
+  if (/\b(renew|renewal|expire|expiring)\b/i.test(lower)) {
+    return INTENTS.RENEWAL;
+  }
+  if (/\b(claim|claims|reimburse|hospital bill)\b/i.test(lower)) {
+    return INTENTS.CLAIMS;
+  }
+  if (/\b(hospital|cashless|network)\b/i.test(lower)) {
+    return INTENTS.CASHLESS_HOSPITAL;
+  }
+  if (/\b(advisor|human|agent|representative)\b/i.test(lower)) {
+    return INTENTS.TALK_TO_ADVISOR;
+  }
+  if (/\b(complaint|unhappy|issue)\b/i.test(lower)) {
+    return INTENTS.COMPLAINT;
+  }
+
+  return INTENTS.UNKNOWN;
+}
+
 function getLocalFallbackResponse(speech, stage) {
   const lower = (speech || "").toLowerCase().trim();
 
@@ -1363,7 +1663,7 @@ function getLocalFallbackResponse(speech, stage) {
       return "Great! How can I help you today? You can ask about buying a new health plan, policy renewal, cashless claims, or network hospitals.";
     }
     if (stage === STAGES.NEED_ANALYSIS || stage === STAGES.PROFILING) {
-      return "Got it! Could you please tell me your age and current city so I can suggest the best TATA AIG plan?";
+      return "Got it! Could you please tell me your age so I can suggest the best TATA AIG plan?";
     }
     return "Great! How can I assist you with your TATA AIG Health Insurance policy today?";
   }
@@ -1373,7 +1673,7 @@ function getLocalFallbackResponse(speech, stage) {
   }
 
   if (lower.includes("buy") || lower.includes("new") || lower.includes("purchase") || lower.includes("plan") || lower.includes("policy") || lower.includes("1")) {
-    return "Wonderful! Let's find the right health plan for you. Could you tell me your age and current city?";
+    return "Wonderful! Let's find the right health plan for you. Could you tell me your age?";
   }
 
   if (lower.includes("renew") || lower.includes("renewal") || lower.includes("expire") || lower.includes("2")) {
@@ -1405,6 +1705,16 @@ function buildLocalFallbackResult(conversation, speechResult, tracker, reason, s
     tracker.aiTrace.exactFallbackSourceFunction = sourceFn;
   }
   log.error(`Fallback triggered at ${sourceFn}`, { reason, reqId: tracker?.reqId });
+
+  if (conversation.intent === INTENTS.UNKNOWN) {
+    const guess = detectIntentLocally(speechResult);
+    if (guess !== INTENTS.UNKNOWN) {
+      conversation.intent = guess;
+      conversation.stage = INTENT_TO_STAGE[guess] || STAGES.BUY_POLICY;
+    }
+  }
+
+  conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
 
   let spokenResponse;
   if (conversation.intent && conversation.intent !== INTENTS.UNKNOWN) {
@@ -1439,13 +1749,18 @@ function buildLocalFallbackResult(conversation, speechResult, tracker, reason, s
 }
 
 async function getTurnResponse(env, conversationState, speechResult, tracker) {
+  const emotionMeta = detectEmotionFast(speechResult);
+  conversationState.lastCustomerSpeech = speechResult;
+  conversationState.currentEmotion = emotionMeta.emotion;
+  conversationState.currentTone = emotionMeta.tone;
+
   const systemPrompt = tracker
-    ? tracker.measure("promptConstructionMs", () => buildAshaSystemPrompt(conversationState, conversationState.direction))
-    : buildAshaSystemPrompt(conversationState, conversationState.direction);
+    ? tracker.measure("promptConstructionMs", () => buildSmartSystemPrompt(conversationState, conversationState.direction, emotionMeta))
+    : buildSmartSystemPrompt(conversationState, conversationState.direction, emotionMeta);
 
   const userPrompt = tracker
-    ? tracker.measure("historyLookupMs", () => buildUserPrompt(speechResult, conversationState.history))
-    : buildUserPrompt(speechResult, conversationState.history);
+    ? tracker.measure("historyLookupMs", () => buildSmartUserPrompt(speechResult, conversationState.history, conversationState.lastQuestion, conversationState))
+    : buildSmartUserPrompt(speechResult, conversationState.history, conversationState.lastQuestion, conversationState);
 
   const AI_TIMEOUT_MARKER = Symbol("timeout");
   let rawAiText = "";
@@ -1479,6 +1794,8 @@ async function getTurnResponse(env, conversationState, speechResult, tracker) {
   if (tracker) tracker.aiTrace.validationResult = validatedText;
   result.spokenResponse = validatedText;
   result.extractedFields = result.extractedFields || {};
+  result.customerEmotion = result.customerEmotion || emotionMeta.emotion;
+  result.responseTone = result.responseTone || emotionMeta.tone;
   return result;
 }
 
@@ -1729,6 +2046,10 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   let aiResult = null;
   let replyText = "";
 
+  // ── FLOW MANAGER: Step 1 – run fast local extraction to grab any obvious
+  //    fields (policy numbers, DTMF digits) and merge into session BEFORE
+  //    the AI call. The AI still runs on every turn — this just pre-populates
+  //    the session so the system prompt context is richer.
   const localExtracted = runLocalExtraction(speechResult, conversation);
 
   const isIntentSelectionPhase =
@@ -1745,56 +2066,20 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
   for (const [key, value] of Object.entries(localExtracted.extractedFields)) {
     if (value !== null && value !== undefined && value !== "") {
       conversation.customer[key] = value;
+      extractedByLocal[key] = value;
     }
   }
   conversation.missingFields = getMissingFields(conversation.customer, conversation.intent);
 
-  const hasUsefulInfo = hasUsefulLocalInfo(localExtracted, speechResult);
-
-  if (hasUsefulInfo) {
-    extractedByLocal = localExtracted.extractedFields;
-
-    const hasAllQuoteFields = QUOTE_REQUIRED_FIELDS.every((key) => {
-      const val = conversation.customer[key];
-      return val !== undefined && val !== null && val !== "" && String(val).toLowerCase() !== "unknown";
-    });
-
-    if (hasAllQuoteFields && !conversation.quote) {
-      conversation.quote = tracker
-        ? tracker.measure("planRecommendationMs", () => recommendPlan(conversation.customer))
-        : recommendPlan(conversation.customer);
-      if (env.DB && callRow && callRow.customer_id) {
-        try {
-          await tracker.measureAsync("dbWritesMs", async () => {
-            await env.DB.prepare("INSERT INTO insurance_quotes (customer_id, plan_name, coverage_amount, premium_estimate) VALUES (?, ?, ?, ?)")
-              .bind(callRow.customer_id, conversation.quote.planName, conversation.quote.coverage, conversation.quote.premiumRange)
-              .run();
-          });
-        } catch (e) {
-          log.error("D1 quote save error", { error: e.message });
-        }
-      }
-    }
-
-    conversation.stage = tracker
-      ? tracker.measure("stateMachineMs", () => computeNextStage(conversation, {
-          detectedIntent: conversation.intent,
-          extractedFields: extractedByLocal,
-          wantsHuman: false
-        }, speechResult))
-      : computeNextStage(conversation, {
-          detectedIntent: conversation.intent,
-          extractedFields: extractedByLocal,
-          wantsHuman: false
-        }, speechResult);
-
-    replyText = generateLocalResponse(conversation);
-
-  } else {
+  // ── FLOW MANAGER: Step 2 – ALWAYS send to Groq AI.
+  //    The AI gets: current goal, what's known, what's missing, AND Asha's
+  //    last question so short answers like "2", "yes", "Mumbai" are always
+  //    interpreted correctly as answers to the previous question.
+  {
     handledBy = env.GROQ_API_KEY ? "groq" : (env.GEMINI_API_KEY ? "gemini" : "openai");
     usedAI = true;
     aiProvider = env.GROQ_API_KEY ? "groq" : (env.GEMINI_API_KEY ? "gemini" : (env.OPENAI_API_KEY ? "openai" : "none"));
-    fallbackReason = "Local rules found no useful fields or intents";
+    fallbackReason = null;
 
     const aiStart = Date.now();
     aiResult = await getTurnResponse(env, conversation, speechResult, tracker);
@@ -1803,7 +2088,23 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     extractedByGemini = aiResult ? (aiResult.extractedFields || {}) : {};
 
     if (aiResult) {
-      if (aiResult.detectedIntent && aiResult.detectedIntent !== INTENTS.UNKNOWN) {
+      const aiIsIntentSelectionPhase =
+        conversation.intent === INTENTS.UNKNOWN ||
+        conversation.stage === STAGES.WELCOME ||
+        conversation.stage === STAGES.INTENT_SELECTION;
+
+      const validIntents = Object.values(INTENTS);
+      const isValidIntent = validIntents.includes(aiResult.detectedIntent);
+      const meetsConfidence = (aiResult.intentConfidence ?? 1.0) >= CONFIG.INTENT_CONFIDENCE_THRESHOLD;
+
+      const shouldSwitchIntent =
+        aiResult.detectedIntent &&
+        aiResult.detectedIntent !== INTENTS.UNKNOWN &&
+        isValidIntent &&
+        meetsConfidence &&
+        (aiIsIntentSelectionPhase || aiResult.detectedIntent === conversation.intent);
+
+      if (shouldSwitchIntent) {
         conversation.intent = aiResult.detectedIntent;
       }
       
@@ -1848,6 +2149,28 @@ async function processTurn(env, conversation, rawSpeech, callSid, callRow, track
     } else {
       replyText = "I'm sorry, I'm having trouble processing that right now. Could you repeat?";
     }
+  }
+
+  // Fallback guard: If replyText asks for multiple things or repeats previous question, fix it dynamically
+  const isRepeat = conversation.lastQuestion && (
+    replyText.trim().toLowerCase() === conversation.lastQuestion.trim().toLowerCase() ||
+    (replyText.includes("age") && replyText.includes("city") && conversation.lastQuestion.includes("age"))
+  );
+
+  if (isRepeat && conversation.missingFields && conversation.missingFields.length > 0) {
+    const nextField = conversation.missingFields[0];
+    const singleFieldQuestions = {
+      age: "Great! Could you please tell me your age?",
+      city: "Got it! Which city are you currently based in?",
+      family_members: "Understood! Would this cover just yourself, or your family members as well?",
+      medical_history: "And do you or anyone being covered have any existing medical conditions?",
+      budget: "What is your approximate annual budget for the health policy premium?",
+      buying_timeline: "When are you looking to start this policy — right away, or exploring for later?",
+      policy_number: "Could you share your existing policy number?",
+      renewal_date: "When is your current policy due for renewal?",
+      hospital_name: "Which hospital is the admission or treatment planned at?",
+    };
+    replyText = singleFieldQuestions[nextField] || `Could you please tell me your ${nextField.replace("_", " ")}?`;
   }
 
   const appointmentDatetime = (extractedByLocal.appointment_datetime || (aiResult && aiResult.extractedFields && aiResult.extractedFields.appointment_datetime));
@@ -2655,124 +2978,25 @@ async function handleChatEndpoint(request, env, tracker) {
     body = await tracker.measureAsync("requestParsingMs", () => request.json());
   } catch {}
 
-  let sessionId = body.sessionId || body.session_id || null;
-  const userText = (body.text || "").trim();
-  const phone = body.phone || "+916000000000";
-  const direction = body.direction || CALL_DIRECTION.INBOUND;
+  const userText = body.text || "";
+  const history = Array.isArray(body.history) ? body.history : [];
 
-  let conversation = null;
-  let callRow = null;
+  const conversationState = {
+    direction: CALL_DIRECTION.INBOUND,
+    intent: INTENTS.UNKNOWN,
+    stage: STAGES.WELCOME,
+    history,
+    customer: {},
+    missingFields: [],
+  };
 
-  if (sessionId && env.DB) {
-    try {
-      callRow = await tracker.measureAsync("sessionLookupMs", async () => {
-        return env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
-      });
-      if (callRow && callRow.session_data) {
-        conversation = JSON.parse(callRow.session_data);
-      }
-    } catch (e) {
-      log.error("D1 session lookup failed in /chat", { error: e.message });
-    }
-  }
-
-  // First call or session not found -> initialize new session
-  if (!sessionId || !conversation) {
-    sessionId = sessionId || `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    let customer = { phone };
-    if (env.DB) {
-      try {
-        customer = await dbGetOrCreateCustomer(env.DB, phone, tracker);
-      } catch {}
-    }
-
-    conversation = buildInitialConversation(direction, phone, customer);
-    const greeting = buildGreeting(direction);
-    conversation.lastQuestion = greeting;
-    conversation.history.push({ role: "asha", text: greeting });
-    conversation.turnCount = 1;
-
-    if (env.DB) {
-      try {
-        await tracker.measureAsync("dbWritesMs", async () => {
-          await env.DB.prepare(
-            "INSERT OR REPLACE INTO voice_calls (call_sid, phone, customer_id, status, stage, profiling_index, session_data) VALUES (?, ?, ?, 'in_progress', ?, 0, ?)"
-          ).bind(sessionId, phone, customer.id || null, conversation.stage, JSON.stringify(conversation)).run();
-        });
-      } catch (e) {
-        log.error("D1 insert call in /chat error", { error: e.message });
-      }
-    }
-
-    // If user text was provided on first call, process it
-    if (userText) {
-      const { replyText, isEnding, wantsHuman } = await processTurn(env, conversation, userText, sessionId, callRow, tracker);
-      return jsonResponse(
-        {
-          sessionId,
-          reply: replyText,
-          stage: conversation.stage,
-          ended: isEnding,
-          wantsHuman,
-          intent: conversation.intent,
-          customer: conversation.customer,
-          missingFields: conversation.missingFields,
-          quote: conversation.quote,
-        },
-        200,
-        reqOrigin,
-        tracker
-      );
-    }
-
-    return jsonResponse(
-      {
-        sessionId,
-        reply: greeting,
-        stage: conversation.stage,
-        customer: conversation.customer,
-        missingFields: conversation.missingFields,
-        ended: false,
-      },
-      200,
-      reqOrigin,
-      tracker
-    );
-  }
-
-  // Subsequent turn call with existing sessionId
-  if (!userText) {
-    return jsonResponse(
-      {
-        sessionId,
-        reply: conversation.lastQuestion || buildGreeting(conversation.direction),
-        stage: conversation.stage,
-        customer: conversation.customer,
-        missingFields: conversation.missingFields,
-        ended: conversation.stage === STAGES.ENDED,
-        wantsHuman: conversation.stage === STAGES.HUMAN_TRANSFER,
-        intent: conversation.intent,
-        quote: conversation.quote,
-      },
-      200,
-      reqOrigin,
-      tracker
-    );
-  }
-
-  const { replyText, isEnding, wantsHuman } = await processTurn(env, conversation, userText, sessionId, callRow, tracker);
+  const aiResult = await getTurnResponse(env, conversationState, userText, tracker);
 
   return jsonResponse(
     {
-      sessionId,
-      reply: replyText,
-      stage: conversation.stage,
-      ended: isEnding,
-      wantsHuman,
-      intent: conversation.intent,
-      customer: conversation.customer,
-      missingFields: conversation.missingFields,
-      quote: conversation.quote,
+      reply: aiResult.spokenResponse || "Hello! How can I assist you with TATA AIG health insurance today?",
+      intent: aiResult.detectedIntent || "general_inquiry",
+      action: aiResult.action || "NONE",
     },
     200,
     reqOrigin,
@@ -2869,6 +3093,8 @@ async function handleVoicesEndpoint(request, env) {
   });
 }
 
+const MEMORY_SESSIONS = new Map();
+
 async function handleBrowserSession(request, env, ctx, tracker) {
   const reqOrigin = request.headers.get("Origin") || "*";
   let body = {};
@@ -2893,6 +3119,8 @@ async function handleBrowserSession(request, env, ctx, tracker) {
   conversation.lastQuestion = greeting;
   conversation.history.push({ role: "asha", text: greeting });
   conversation.turnCount = 1;
+
+  MEMORY_SESSIONS.set(sessionId, conversation);
 
   if (env.DB) {
     try {
@@ -2932,16 +3160,34 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
   if (!sessionId || !speechResult) return jsonResponse({ error: "Missing sessionId or speechResult" }, 400, reqOrigin, tracker);
 
   let callRow = null;
+  let conversation = null;
   if (env.DB) {
     try {
       callRow = await tracker.measureAsync("sessionLookupMs", async () => {
         return env.DB.prepare("SELECT * FROM voice_calls WHERE call_sid = ?").bind(sessionId).first();
       });
+      if (callRow && callRow.session_data) {
+        conversation = JSON.parse(callRow.session_data);
+      }
     } catch {}
   }
-  if (!callRow) return jsonResponse({ error: "Session not found" }, 404, reqOrigin, tracker);
 
-  const conversation = JSON.parse(callRow.session_data || "{}");
+  if (!conversation) {
+    conversation = MEMORY_SESSIONS.get(sessionId);
+  }
+
+  if (!conversation) {
+    // Session reconstruction fallback so browser calls NEVER fail with 404
+    const direction = body.direction || CALL_DIRECTION.INBOUND;
+    const phone = body.phone || "+916000000000";
+    conversation = buildInitialConversation(direction, phone, { phone });
+    if (body.customer && typeof body.customer === "object") {
+      Object.assign(conversation.customer, body.customer);
+    }
+    if (body.history && Array.isArray(body.history)) {
+      conversation.history = body.history;
+    }
+  }
 
   if (speechResult && /^[1-9]$/.test(speechResult.trim()) && (conversation.stage === STAGES.WELCOME || conversation.stage === STAGES.INTENT_SELECTION || conversation.stage === STAGES.GREETING)) {
     const digit = speechResult.trim();
@@ -2988,6 +3234,7 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
       }
     }
 
+    MEMORY_SESSIONS.set(sessionId, conversation);
     const metrics = tracker.finish();
     return jsonResponse(
       {
@@ -3036,6 +3283,8 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
     extractedByGemini
   } = await processTurn(env, conversation, speechResult, sessionId, callRow, tracker);
 
+  MEMORY_SESSIONS.set(sessionId, conversation);
+
   if (isEnding || wantsHuman) {
     ctx.waitUntil(syncCRMAndWhatsApp(env, conversation, sessionId, tracker));
   }
@@ -3062,6 +3311,8 @@ async function handleBrowserTurn(request, env, ctx, tracker) {
       model: env.GROQ_MODEL || CONFIG.GROQ_MODEL,
       timings: metrics,
       aiTrace: tracker.aiTrace,
+      customerEmotion: aiResult?.customerEmotion || conversation.currentEmotion || "neutral",
+      responseTone: aiResult?.responseTone || conversation.currentTone || "professional",
       handledBy,
       usedAI,
       aiProvider,

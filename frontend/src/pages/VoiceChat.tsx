@@ -5,9 +5,9 @@ import { TranscriptPanel } from '@/components/voice/TranscriptPanel'
 import { StatusBar } from '@/components/voice/StatusBar'
 import { Waveform } from '@/components/voice/Waveform'
 import { AIInspector } from '@/components/inspector/AIInspector'
-import { useVoiceSession } from '@/hooks/useVoiceSession'
+import { useVoiceSession, PRESET_OUTBOUND_LEADS } from '@/hooks/useVoiceSession'
 import { useVoiceStore } from '@/store'
-import { Mic, PhoneOff, Sparkles, Cpu, MessageSquare, Play, HelpCircle, Volume2 } from 'lucide-react'
+import { Mic, PhoneOff, Sparkles, Cpu, MessageSquare, Play, HelpCircle, PhoneIncoming, PhoneOutgoing, User, Volume2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 type MobileTab = 'chat' | 'inspector'
@@ -18,9 +18,10 @@ export function VoiceChat() {
     stopSession,
     startManualListening,
     sendTurn,
-    isTyping,
-    wantsHumanBanner,
-    isEnded,
+    callDirection,
+    setCallDirection,
+    selectedLead,
+    setSelectedLead,
   } = useVoiceSession()
   const { status, messages, currentStage, currentModel, lastLatencyMs, sessionStartTime, lastTurn, sessionId } = useVoiceStore()
 
@@ -30,9 +31,9 @@ export function VoiceChat() {
   const hasSession = !!sessionId
 
   const handleToggleSession = () => {
-    if (!hasSession || isEnded) {
+    if (!hasSession) {
       startSession()
-      toast.success('Voice session started')
+      toast.success(`${callDirection === 'inbound' ? 'Inbound' : 'Outbound'} voice call started!`)
     } else {
       stopSession()
       toast.info('Call ended')
@@ -42,7 +43,7 @@ export function VoiceChat() {
   const handleSendText = (e?: React.FormEvent) => {
     if (e) e.preventDefault()
     if (!textInput.trim()) return
-    if (!hasSession || isEnded) {
+    if (!hasSession) {
       startSession()
     }
     sendTurn(textInput.trim())
@@ -50,7 +51,7 @@ export function VoiceChat() {
   }
 
   const handleTestPreset = (text: string) => {
-    if (!hasSession || isEnded) {
+    if (!hasSession) {
       startSession()
       setTimeout(() => sendTurn(text), 700)
     } else {
@@ -62,21 +63,21 @@ export function VoiceChat() {
   const clientDemoScenarios = [
     {
       title: 'Buy Family Plan',
-      tag: 'Family (5 Members)',
+      tag: 'Inbound (5 Members)',
       text: 'I am 21 years old with 21k of budget and I need to cover all 5 family members',
-      desc: 'Triggers instant family floater quote & 80D tax benefits',
+      desc: 'Collects data in real-time & calculates family floater quote',
     },
     {
       title: 'Cashless Hospital',
-      tag: '7000+ Hospitals',
+      tag: 'Network Locator',
       text: 'Which cashless network hospitals are available in Mumbai?',
       desc: 'Lists Lilavati & Kokilaben with WhatsApp locator link',
     },
     {
-      title: 'Policy Renewal',
-      tag: 'Direct Link',
-      text: 'I want to renew my TATA AIG policy number 987654321',
-      desc: 'Checks eligibility & sends WhatsApp payment link',
+      title: 'Outbound Renewal',
+      tag: 'Outbound DB Lead',
+      text: 'Yes speaking, I want to renew my Medicare policy',
+      desc: 'Fetches Rakesh Kumar details dynamically from DB',
     },
     {
       title: 'File Claim',
@@ -88,16 +89,16 @@ export function VoiceChat() {
       title: 'Speak to Advisor',
       tag: 'Human Transfer',
       text: 'Can I connect with a senior health advisor directly?',
-      desc: 'Transfers call to specialist & flags lead score',
+      desc: 'Transfers call & updates CRM lead score to HOT',
     },
   ]
 
-  // Interactive Quick Response Chips
+  // Interactive Quick Chips
   const quickChips = [
     'I want to buy new policy',
     'Age 21, budget 21k, family of 5',
     'Cashless hospitals in Mumbai',
-    'Renew policy 987654321',
+    'Renew policy POL-882194',
     'Yes, schedule appointment',
   ]
 
@@ -108,7 +109,7 @@ export function VoiceChat() {
       {/* ════════════════════════════════════════════════════════════ */}
 
       {/* Left panel: Client Demo Scenarios */}
-      <div className="hidden md:flex w-[280px] flex-shrink-0 flex-col border-r border-border bg-bg-card/60 overflow-y-auto">
+      <div className="hidden md:flex w-[290px] flex-shrink-0 flex-col border-r border-border bg-bg-card/60 overflow-y-auto">
         <div className="px-4 py-3 border-b border-border bg-bg-card/80 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles size={16} className="text-accent" />
@@ -117,7 +118,66 @@ export function VoiceChat() {
           <span className="text-[10px] bg-accent/15 text-accent px-2 py-0.5 rounded-full font-bold">1-Click</span>
         </div>
 
-        <div className="p-3.5 flex flex-col gap-2.5">
+        {/* Call Direction Mode Switcher */}
+        <div className="p-3 border-b border-border/60 bg-bg-surface/50 flex flex-col gap-2">
+          <label className="text-[11px] font-bold text-text-muted uppercase tracking-wider">Select Call Mode:</label>
+          <div className="grid grid-cols-2 gap-1.5 p-1 bg-bg-card rounded-xl border border-border">
+            <button
+              onClick={() => {
+                if (!hasSession) setCallDirection('inbound')
+              }}
+              disabled={hasSession}
+              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                callDirection === 'inbound'
+                  ? 'bg-accent text-white shadow-sm'
+                  : 'text-text-muted hover:text-text-primary'
+              }`}
+            >
+              <PhoneIncoming size={13} />
+              Inbound
+            </button>
+            <button
+              onClick={() => {
+                if (!hasSession) setCallDirection('outbound')
+              }}
+              disabled={hasSession}
+              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                callDirection === 'outbound'
+                  ? 'bg-purple-600 text-white shadow-sm'
+                  : 'text-text-muted hover:text-text-primary'
+              }`}
+            >
+              <PhoneOutgoing size={13} />
+              Outbound
+            </button>
+          </div>
+
+          {/* Outbound Dynamic DB Customer Selector */}
+          {callDirection === 'outbound' && (
+            <div className="flex flex-col gap-1 mt-1 p-2 rounded-lg bg-purple-950/20 border border-purple-500/30">
+              <span className="text-[10px] text-purple-300 font-semibold flex items-center gap-1">
+                <User size={11} /> Outbound DB Target:
+              </span>
+              <select
+                value={selectedLead.phone}
+                onChange={(e) => {
+                  const found = PRESET_OUTBOUND_LEADS.find((l) => l.phone === e.target.value)
+                  if (found) setSelectedLead(found)
+                }}
+                disabled={hasSession}
+                className="w-full bg-bg-card border border-border text-xs rounded-lg px-2 py-1 text-text-primary font-medium focus:outline-none"
+              >
+                {PRESET_OUTBOUND_LEADS.map((lead) => (
+                  <option key={lead.phone} value={lead.phone}>
+                    {lead.name} ({lead.city} - {lead.notes})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
+        <div className="p-3 flex flex-col gap-2.5">
           {clientDemoScenarios.map((scenario) => (
             <button
               key={scenario.title}
@@ -147,15 +207,7 @@ export function VoiceChat() {
           latencyMs={lastLatencyMs}
           sessionStartTime={sessionStartTime}
         />
-        <TranscriptPanel
-          messages={messages}
-          liveTranscript=""
-          isTyping={isTyping}
-          wantsHumanBanner={wantsHumanBanner}
-          isEnded={isEnded}
-          currentStage={currentStage}
-          lastTurn={lastTurn}
-        />
+        <TranscriptPanel messages={messages} liveTranscript="" />
 
         {/* Quick Option Chips */}
         <div className="px-6 py-2 border-t border-border/50 bg-bg-card/20 flex items-center gap-2 overflow-x-auto">
@@ -174,30 +226,34 @@ export function VoiceChat() {
         </div>
 
         <div className="flex flex-col items-center gap-3 px-6 py-3 border-t border-border bg-bg-card/30">
-          <Waveform status={status} hasSession={hasSession && !isEnded} />
+          <Waveform status={status} hasSession={hasSession} />
 
           {/* Voice Response Status Indicator */}
-          {status === 'listening' && !isEnded && (
+          {status === 'listening' && (
             <div className="flex items-center gap-2 text-xs font-semibold text-emerald-400 animate-pulse">
               <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-              Listening to microphone... Speak now
+              Listening to your voice microphone... Speak now
             </div>
           )}
           {status === 'speaking' && (
             <div className="flex items-center gap-2 text-xs font-semibold text-accent">
               <Volume2 size={14} className="animate-bounce" />
-              Asha is speaking via ElevenLabs TTS...
+              Asha is speaking via ElevenLabs voice...
             </div>
           )}
 
           <div className="flex items-center gap-4">
-            {!hasSession || isEnded ? (
+            {!hasSession ? (
               <button
                 onClick={handleToggleSession}
-                className="flex items-center gap-2 px-6 py-3 rounded-xl bg-accent hover:bg-accent-hover text-white font-bold text-sm shadow-lg shadow-accent/25 transition-all cursor-pointer"
+                className={`flex items-center gap-2 px-6 py-3 rounded-xl font-bold text-sm shadow-lg transition-all cursor-pointer ${
+                  callDirection === 'inbound'
+                    ? 'bg-accent hover:bg-accent-hover text-white shadow-accent/25'
+                    : 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-600/25'
+                }`}
               >
-                <Mic size={18} />
-                Start Voice Session
+                {callDirection === 'inbound' ? <PhoneIncoming size={18} /> : <PhoneOutgoing size={18} />}
+                Start {callDirection === 'inbound' ? 'Inbound' : 'Outbound'} Call
               </button>
             ) : (
               <>
@@ -207,7 +263,7 @@ export function VoiceChat() {
                   className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-sm shadow-md transition-all cursor-pointer"
                 >
                   <PhoneOff size={16} />
-                  End Session
+                  End Call
                 </button>
               </>
             )}
@@ -260,7 +316,7 @@ export function VoiceChat() {
         {/* Mobile Tab Switcher */}
         <div className="flex border-b border-border bg-bg-card/80 flex-shrink-0">
           {[
-            { id: 'chat' as MobileTab, label: 'Voice & Chat', icon: MessageSquare },
+            { id: 'chat' as MobileTab, label: 'Voice & Call', icon: MessageSquare },
             { id: 'inspector' as MobileTab, label: 'AI & CRM Inspector', icon: Cpu },
           ].map(({ id, label, icon: Icon }) => (
             <button
@@ -280,18 +336,10 @@ export function VoiceChat() {
         <div className="flex-1 overflow-hidden flex flex-col">
           {mobileTab === 'chat' ? (
             <div className="flex-1 flex flex-col overflow-hidden">
-              <TranscriptPanel
-                messages={messages}
-                liveTranscript=""
-                isTyping={isTyping}
-                wantsHumanBanner={wantsHumanBanner}
-                isEnded={isEnded}
-                currentStage={currentStage}
-                lastTurn={lastTurn}
-              />
+              <TranscriptPanel messages={messages} liveTranscript="" />
               <div className="flex flex-col items-center gap-3 px-4 py-3 border-t border-border bg-bg-card/30">
-                <Waveform status={status} hasSession={hasSession && !isEnded} />
-                {!hasSession || isEnded ? (
+                <Waveform status={status} hasSession={hasSession} />
+                {!hasSession ? (
                   <button
                     onClick={handleToggleSession}
                     className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-accent text-white font-bold text-xs shadow-md"
